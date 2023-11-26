@@ -33,5 +33,5 @@ jobs:
       - name: Update posts
         uses: gautamkrishnar/blog-post-workflow@master
         with:
-          feed_list: "https://dreamhomes.top/atom.xml"
+          feed_list: "https://rsshub.app/telegram/channel/faketoulu"
           max_post_count: 7
