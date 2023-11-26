@@ -3,7 +3,6 @@ name: Latest blog post workflow
 on:
   schedule:
     - cron: '0 3 * * *'
-
   workflow_dispatch:
 
 jobs:
@@ -21,7 +20,9 @@ jobs:
           python-version: '3.x'
 
       - name: Install Python dependencies
-        run: python -m pip install urllib3 lxml
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run Python script
+      - name: Run script to update README
         run: python generateReadme.py
