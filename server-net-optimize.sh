@@ -102,8 +102,49 @@ modify_dns_and_hosts() {
     fi
 }
 
+
 manage_swap() {
     while true; do
+        echo -e "\n当前系统状态："
+
+        # 显示交换空间使用情况
+        if command -v swapon &> /dev/null; then
+            swap_info=$(swapon --show=NAME,SIZE,USED --noheadings)
+            if [[ -n "$swap_info" ]]; then
+                echo -e "交换空间存在，使用情况如下："
+                echo "$swap_info"
+            else
+                echo "当前没有启用的交换空间。"
+            fi
+        else
+            echo "swapon 命令不可用，无法检测交换空间。"
+        fi
+
+        # 显示磁盘空间使用情况
+        if command -v df &> /dev/null; then
+            disk_info=$(df -h --output=source,size,used,avail,pcent | grep -E '^/dev/')
+            if [[ -n "$disk_info" ]]; then
+                echo -e "\n磁盘使用情况："
+                echo "$disk_info"
+            else
+                echo "无法获取磁盘使用情况，或没有已挂载的磁盘。"
+            fi
+        else
+            echo "df 命令不可用，无法检测磁盘使用情况。"
+        fi
+
+        # 显示内存使用情况
+        if command -v free &> /dev/null; then
+            memory_info=$(free -h --si | awk '/^Mem:/ {print "内存：" $3 " 已用 / " $2 " 总量"}')
+            swap_memory_info=$(free -h --si | awk '/^Swap:/ {print "交换空间：" $3 " 已用 / " $2 " 总量"}')
+            echo -e "\n内存使用情况："
+            echo "$memory_info"
+            echo "$swap_memory_info"
+        else
+            echo "free 命令不可用，无法检测内存使用情况。"
+        fi
+
+        # 打印操作菜单
         echo -e "\n请选择操作：\n1) 设置交换空间\n2) 设置内核参数\n3) 退出"
         read -rp "输入选项编号: " choice
 
@@ -115,6 +156,7 @@ manage_swap() {
         esac
     done
 }
+ 
 
 validate_input() {
     local prompt="$1"
