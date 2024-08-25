@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # 检查是否有 IPv4 地址
-ipv4_address=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+ipv4_address=$(ip -4 addr show | awk '/inet / {print $2}' | cut -d/ -f1)
 
 # 检查是否有 IPv6 地址
-ipv6_address=$(ip -6 addr show | grep -oP '(?<=inet6\s)[\da-f:]+')
+ipv6_address=$(ip -6 addr show | awk '/inet6 / {print $2}' | cut -d/ -f1)
 
 # 检查网络环境并输出结果
 if [[ -n "$ipv4_address" && -n "$ipv6_address" ]]; then
