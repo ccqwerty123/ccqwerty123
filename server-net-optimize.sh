@@ -57,6 +57,8 @@ check_ip() {
 
 # 修改DNS和hosts文件
 modify_dns_and_hosts() {
+    ipv6_regex="^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
+
     if [[ -z "$IPv4_ADDR" && -n "$IPv6_ADDR" ]]; then
         echo "只存在IPv6地址，修改DNS为DNS64"
         echo "nameserver 2606:4700:4700::64" | sudo tee /etc/resolv.conf
@@ -65,40 +67,72 @@ modify_dns_and_hosts() {
 
     if [[ -n "$IPv6_ADDR" ]]; then
         echo "检测到IPv6地址，尝试获取Google IPv6地址并添加到hosts文件"
-        google_ipv6=""
 
-        # 尝试使用curl
-        if command -v curl &> /dev/null; then
-            google_ipv6=$(curl -6 -s https://domains.google.com/checkip)
-        fi
+        get_google_ipv6() {
+            local google_ipv6=""
 
-        # 如果curl失败，尝试使用dig
-        if [[ -z "$google_ipv6" ]] && command -v dig &> /dev/null; then
-            google_ipv6=$(dig AAAA google.com +short | head -n 1)
-        fi
+            get_ipv6_with_dig() {
+                dig aaaa google.com +short | grep -E "$ipv6_regex" | head -n 1
+            }
 
-        # 如果dig失败，尝试使用host
-        if [[ -z "$google_ipv6" ]] && command -v host &> /dev/null; then
-            google_ipv6=$(host -t AAAA google.com | grep "has IPv6 address" | head -n 1 | awk '{print $NF}')
-        fi
+            get_ipv6_with_curl() {
+                curl -6 -s 'https://ifconfig.co' | grep -Eo "$ipv6_regex" | head -n 1
+            }
 
-        # 如果host也失败，尝试使用nslookup
-        if [[ -z "$google_ipv6" ]] && command -v nslookup &> /dev/null; then
-            google_ipv6=$(nslookup -type=AAAA google.com | grep "has AAAA address" | head -n 1 | awk '{print $NF}')
-        fi
+            get_ipv6_with_wget() {
+                wget -6 -qO - 'https://ifconfig.co' | grep -Eo "$ipv6_regex" | head -n 1
+            }
 
-        # 如果以上方法都失败，尝试使用getent
-        if [[ -z "$google_ipv6" ]] && command -v getent &> /dev/null; then
-            google_ipv6=$(getent ahostsv6 google.com | head -n 1 | awk '{print $1}')
-        fi
+            get_ipv6_with_ping6() {
+                ping6 -c 1 google.com 2>&1 | grep 'from' | sed 's/.*from \([0-9a-fA-F:]*\).*/\1/'
+            }
 
-        if [[ -n "$google_ipv6" ]]; then
-            echo "获取到Google IPv6地址: $google_ipv6"
-            echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts
-            echo "已将Google IPv6地址添加到hosts文件"
-        else
-            echo "无法获取Google IPv6地址，请检查网络连接或DNS设置"
-        fi
+            get_ipv6_with_getent() {
+                getent hosts google.com | grep -Eo "$ipv6_regex" | head -n 1
+            }
+
+            # 尝试获取 IPv6 地址
+            for method in get_ipv6_with_dig get_ipv6_with_curl get_ipv6_with_wget get_ipv6_with_ping6 get_ipv6_with_getent; do
+                if command -v "${method:0:3}" &> /dev/null; then
+                    google_ipv6=$($method)
+                    if [[ -n "$google_ipv6" ]]; then
+                        echo "获取到的谷歌 IPv6 地址: $google_ipv6"
+
+                        # 提示用户选择
+                        echo "请选择操作："
+                        echo "1) 将此地址添加到 /etc/hosts"
+                        echo "2) 使用备用地址：2607:f8b0:4004:c19::6a www.google.com"
+                        echo "3) 退出脚本"
+                        read -p "请输入选项 (1/2/3): " choice
+
+                        case $choice in
+                            1)
+                                echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts
+                                echo "已将Google IPv6地址添加到hosts文件"
+                                return
+                                ;;
+                            2)
+                                echo "2607:f8b0:4004:c19::6a www.google.com" | sudo tee -a /etc/hosts
+                                echo "已将备用地址添加到hosts文件"
+                                return
+                                ;;
+                            3)
+                                echo "退出脚本"
+                                exit 0
+                                ;;
+                            *)
+                                echo "无效选项，退出脚本"
+                                exit 1
+                                ;;
+                        esac
+                    fi
+                fi
+            done
+
+            echo "很抱歉,无法获取到谷歌的 IPv6 地址。"
+        }
+
+        get_google_ipv6
     fi
 }
 
