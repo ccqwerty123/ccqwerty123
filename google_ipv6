@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# 正则表达式匹配有效的 IPv6 地址
+ipv6_regex="^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
+
+# 使用 dig 获取 IPv6 地址
+get_ipv6_with_dig() {
+  # 查询 google.com 的 AAAA 记录，获取 IPv6 地址
+  dig aaaa google.com +short | grep -E "$ipv6_regex" | head -n 1
+}
+
+# 使用 curl 获取 IPv6 地址
+get_ipv6_with_curl() {
+  # 从 ifconfig.co 获取当前的 IPv6 地址
+  curl -6 -s 'https://ifconfig.co' | grep -Eo "$ipv6_regex" | head -n 1
+}
+
+# 使用 wget 获取 IPv6 地址
+get_ipv6_with_wget() {
+  # 使用 wget 获取 IPv6 地址
+  wget -6 -qO - 'https://ifconfig.co' | grep -Eo "$ipv6_regex" | head -n 1
+}
+
+# 使用 ping6 获取 IPv6 地址
+get_ipv6_with_ping6() {
+  # 使用 ping6 获取 IPv6 地址
+  ping6 -c 1 google.com 2>&1 | grep 'from' | sed 's/.*from \([0-9a-fA-F:]*\).*/\1/'
+}
+
+# 使用 getent 获取 IPv6 地址
+get_ipv6_with_getent() {
+  # 查询 google.com 的 AAAA 记录，获取 IPv6 地址
+  getent hosts google.com | grep -Eo "$ipv6_regex" | head -n 1
+}
+
+# 尝试获取 IPv6 地址
+get_google_ipv6() {
+  local google_ipv6=""
+
+  # 尝试使用 dig
+  if command -v dig &> /dev/null; then
+    google_ipv6=$(get_ipv6_with_dig)
+    if [[ -n "$google_ipv6" ]]; then
+      echo "使用 dig 获取到的谷歌 IPv6 地址: $google_ipv6"
+      return 0
+    fi
+  fi
+
+  # 尝试使用 curl
+  if command -v curl &> /dev/null; then
+    google_ipv6=$(get_ipv6_with_curl)
+    if [[ -n "$google_ipv6" ]]; then
+      echo "使用 curl 获取到的谷歌 IPv6 地址: $google_ipv6"
+      return 0
+    fi
+  fi
+
+  # 尝试使用 wget
+  if command -v wget &> /dev/null; then
+    google_ipv6=$(get_ipv6_with_wget)
+    if [[ -n "$google_ipv6" ]]; then
+      echo "使用 wget 获取到的谷歌 IPv6 地址: $google_ipv6"
+      return 0
+    fi
+  fi
+
+  # 尝试使用 ping6
+  if command -v ping6 &> /dev/null; then
+    google_ipv6=$(get_ipv6_with_ping6)
+    if [[ -n "$google_ipv6" ]]; then
+      echo "使用 ping6 获取到的谷歌 IPv6 地址: $google_ipv6"
+      return 0
+    fi
+  fi
+
+  # 尝试使用 getent
+  if command -v getent &> /dev/null; then
+    google_ipv6=$(get_ipv6_with_getent)
+    if [[ -n "$google_ipv6" ]]; then
+      echo "使用 getent 获取到的谷歌 IPv6 地址: $google_ipv6"
+      return 0
+    fi
+  fi
+
+  echo "很抱歉,无法获取到谷歌的 IPv6 地址。"
+  return 1
+}
+
+# 调用函数
+get_google_ipv6
