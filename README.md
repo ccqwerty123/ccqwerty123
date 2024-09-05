@@ -1,6 +1,11 @@
 ### Hi there 👋
 bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
+
 服务器优化
+
+bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/x-ui.sh 2> /dev/null)
+
+x-ui重启
 <!--
 **ccqwerty123/ccqwerty123** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
