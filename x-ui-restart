@@ -1,0 +1,10 @@
+在安装完x-ui-yg版的x-ui以后，输入x-ui可以正常进入脚本的菜单页面，但是x-ui后面加上的参数被无法识别，比如，本来输入命令x-ui restart就可以让x-ui重启，但是现在输入x-ui restart之后的效果是直接进入脚本菜单而忽略了后面的restart参数，这样导致的结果就是无法使用该命令重启脚本。
+还有，这个脚本在crontab中添加了一个每天定时重启脚本的任务，但是现在的结果导致了无法通过x-ui restart命令进行重启，只有输入systemctl restart x-ui.service命令才能重启。这个问题也同样存在于/usr/local/x-ui/goxui.sh中，即使它检测到了xui或xray没有正常运行也无法重启xui。
+建议在下一个版本的程序中修正这个问题，只要将x-ui restart换成systemctl restart x-ui.service就行了。
+另外，goxui.sh这个保活脚本其实只需要写两行代码即可完成原有功能，它们的功能就是判断x-ui和xray是否在正常运行，如果没有运行则重新启动x-ui。
+以下代码供参考：
+#!/bin/bash
+ps -aux | grep -v grep | grep -q x-ui || systemctl restart x-ui.service
+ps -aux | grep -v grep | grep -q xray || systemctl restart x-ui.service
+
+谢谢！
