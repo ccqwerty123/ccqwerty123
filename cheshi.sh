@@ -77,9 +77,10 @@ download_with_ipv6() {
     # 提取协议和路径
     local protocol=$(echo "$url" | awk -F'://' '{print $1}')
     local path=$(echo "$url" | awk -F'://' '{print $2}' | awk -F'/' '{print substr($0, index($0,$2))}')
+    local domain=$(echo "$path" | awk -F'/' '{print $1}')
 
     # 构造新的URL
-    local new_url="$protocol://[$ipv6_address]/$path"
+    local new_url="$protocol://[$ipv6_address]${path#"$domain"}"
 
     # 清理下载目录
     clean_directory "$download_dir"
@@ -92,6 +93,10 @@ download_with_ipv6() {
     # 清理下载目录
     clean_directory "$download_dir"
 }
+
+
+
+
 # 主程序
 main() {
     install_tools
