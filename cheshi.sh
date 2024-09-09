@@ -25,7 +25,7 @@ is_valid_ipv6() {
 get_ipv6_address() {
     local domain=$1
     local dns_server="2001:4860:4860::6464"  # 默认使用Google的DNS64服务器
-    echo "使用的DNS服务器: $dns_server"
+    echo "$dns_server"
     local result=$(dig AAAA +short @$dns_server $domain)
     echo "$result"
     for ip in $result; do
