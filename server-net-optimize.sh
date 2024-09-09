@@ -84,31 +84,26 @@ modify_dns_and_hosts() {
 
             get_ipv6_with_nslookup() {
                 result=$(nslookup -type=AAAA google.com 2>/dev/null)
-                echo "nslookup 结果: $result"
                 echo "$result" | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
             }
 
             get_ipv6_with_host() {
                 result=$(host -t AAAA google.com 2>/dev/null)
-                echo "host 结果: $result"
                 echo "$result" | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
             }
 
             get_ipv6_with_dig() {
                 result=$(dig AAAA google.com +short 2>/dev/null)
-                echo "dig 结果: $result"
                 echo "$result" | grep -E "$ipv6_regex" | head -n 1
             }
 
             get_ipv6_with_curl() {
                 result=$(curl -6 -s 'https://ipv6.icanhazip.com' 2>/dev/null)
-                echo "curl 结果: $result"
                 echo "$result" | grep -E "$ipv6_regex"
             }
 
             get_ipv6_with_wget() {
                 result=$(wget -6 -qO - 'https://ipv6.icanhazip.com' 2>/dev/null)
-                echo "wget 结果: $result"
                 echo "$result" | grep -E "$ipv6_regex"
             }
 
@@ -116,8 +111,8 @@ modify_dns_and_hosts() {
             for method in get_ipv6_with_nslookup get_ipv6_with_host get_ipv6_with_dig get_ipv6_with_curl get_ipv6_with_wget; do
                 if command -v "${method#get_ipv6_with_}" > /dev/null; then
                     google_ipv6=$($method)
-                    echo "尝试的地址: $google_ipv6"
                     if [ -n "$google_ipv6" ]; then
+                        echo "尝试的地址: $method"
                         echo "获取到的谷歌 IPv6 地址: $google_ipv6"
                         handle_google_ipv6 "$google_ipv6"
                         return
