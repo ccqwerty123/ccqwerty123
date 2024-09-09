@@ -77,7 +77,7 @@ modify_dns_and_hosts() {
     fi
 
     if [ -n "$IPv6_ADDR" ]; then
-        echo "检测到IPv6地址，尝试获取Google IPv6地址并添加到hosts文件"
+        echo "检测到IPv6地址，尝试获取Google IPv6地址..."
 
         get_google_ipv6() {
             google_ipv6=""
@@ -112,12 +112,9 @@ modify_dns_and_hosts() {
                 if command -v "${method#get_ipv6_with_}" > /dev/null; then
                     google_ipv6=$($method)
                     if [ -n "$google_ipv6" ]; then
-                        echo "尝试的地址: $method"
                         echo "获取到的谷歌 IPv6 地址: $google_ipv6"
                         handle_google_ipv6 "$google_ipv6"
                         return
-                    else
-                        echo "使用 $method 未能获取到IPv6地址"
                     fi
                 fi
             done
@@ -164,6 +161,7 @@ modify_dns_and_hosts() {
         get_google_ipv6
     fi
 }
+
 
 
 
