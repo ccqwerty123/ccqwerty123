@@ -105,6 +105,7 @@ modify_dns_and_hosts() {
             # 尝试获取 IPv6 地址
             for method in get_ipv6_with_nslookup get_ipv6_with_host get_ipv6_with_dig get_ipv6_with_curl get_ipv6_with_wget; do
                 if command -v "${method#get_ipv6_with_}" > /dev/null; then
+                    echo "尝试使用 $method 获取IPv6地址..."
                     google_ipv6=$($method)
                     if [ -n "$google_ipv6" ]; then
                         echo "获取到的谷歌 IPv6 地址: $google_ipv6"
@@ -113,6 +114,8 @@ modify_dns_and_hosts() {
                     else
                         echo "使用 $method 未能获取到IPv6地址"
                     fi
+                else
+                    echo "$method 命令未找到，跳过。"
                 fi
             done
 
