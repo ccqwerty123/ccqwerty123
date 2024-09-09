@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# 检查是否为有效的IPv6地址
 is_valid_ipv6() {
     local ip=$1
     if [[ $ip =~ ^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$ ]] || 
@@ -20,9 +21,10 @@ is_valid_ipv6() {
     fi
 }
 
+# 获取域名的IPv6地址
 get_ipv6_address() {
     local domain=$1
-    local result=$(dig @2001:4860:4860::6464 AAAA $domain +short)
+    local result=$(dig AAAA +short $domain)
     for ip in $result; do
         if is_valid_ipv6 "$ip"; then
             echo "$ip"
@@ -32,15 +34,18 @@ get_ipv6_address() {
     echo ""
 }
 
+# 将URL中的域名替换为IPv6地址
 replace_domain_with_ipv6() {
     local url=$1
     local ipv6=$2
-    local protocol=$(echo $url | grep :// | sed -e's,^\(.*://\).*,\1,g')
-    local domain=$(echo $url | sed -e s,$protocol,,g | cut -d/ -f1)
-    local path=$(echo $url | sed -e s,$protocol,,g | cut -d/ -f2-)
+    local protocol=$(echo $url | grep :// | sed -e 's,^\(.*://\).*,\1,g')
+    local domain=$(echo $url | sed -e "s,$protocol,,g" | cut -d/ -f1)
+    local path=$(echo $url | sed -e "s,$protocol,,g" | cut -d/ -f2-)
     echo "${protocol}[${ipv6}]/${path}"
 }
 
+# 下载文件并计算下载速度
+# 下载文件并计算下载速度
 download_file() {
     local url=$1
     local start=$(date +%s.%N)
