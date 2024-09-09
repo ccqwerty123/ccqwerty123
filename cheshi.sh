@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# 日志级别: 0=ERROR, 1=INFO, 2=DEBUG
-LOG_LEVEL=2
+set -e
+
+LOG_LEVEL=2  # 0=ERROR, 1=INFO, 2=DEBUG
 
 log() {
     local level=$1
@@ -11,90 +12,88 @@ log() {
     fi
 }
 
+check_ipv6_support() {
+    if [[ -f /proc/net/if_inet6 ]]; then
+        log 1 "IPv6 is supported on this system."
+        return 0
+    else
+        log 0 "IPv6 is not supported on this system."
+        return 1
+    fi
+}
+
+get_current_ipv6() {
+    local ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+')
+    if [[ -n "$ipv6" ]]; then
+        log 1 "Current IPv6 address: $ipv6"
+        echo "$ipv6"
+        return 0
+    else
+        log 0 "No global IPv6 address found."
+        return 1
+    fi
+}
+
+test_ipv6_connectivity() {
+    if ping6 -c 3 google.com &> /dev/null; then
+        log 1 "IPv6 connectivity to google.com is working."
+        return 0
+    else
+        log 0 "Cannot reach google.com via IPv6."
+        return 1
+    fi
+}
+
 get_google_ipv6() {
-    # 更灵活的IPv6正则表达式
-    local ipv6_regex="([0-9a-fA-F]{1,4}:){1,7}([0-9a-fA-F]{1,4}|:)"
-    local google_ipv6=""
-    local timeout=10
-
-    local methods=(
-        "dig aaaa google.com +short"
-        "curl -6 -s 'https://ifconfig.co'"
-        "wget -6 -qO - 'https://ifconfig.co'"
-        "ping6 -c 1 google.com 2>&1 | grep 'from' | sed 's/.*from \([0-9a-fA-F:]*\).*/\1/'"
-        "getent hosts google.com"
-    )
-
-    for method in "${methods[@]}"; do
-        log 2 "Trying method: $method"
-        local result=$(timeout $timeout bash -c "$method")
-        log 2 "Raw result: $result"
-        
-        if [[ -n "$result" ]]; then
-            google_ipv6=$(echo "$result" | grep -oE "$ipv6_regex" | head -n 1)
-            if [[ -n "$google_ipv6" ]]; then
-                log 1 "Google IPv6 address obtained: $google_ipv6"
-                echo "$google_ipv6"
-                return 0
-            else
-                log 2 "No valid IPv6 address found in the result"
-            fi
-        else
-            log 2 "Method returned empty result"
-        fi
-    done
-
-    log 0 "Failed to obtain Google IPv6 address."
-    return 1
+    local google_ipv6=$(dig AAAA google.com +short)
+    if [[ -n "$google_ipv6" ]]; then
+        log 1 "Google's IPv6 address: $google_ipv6"
+        echo "$google_ipv6"
+        return 0
+    else
+        log 0 "Failed to get Google's IPv6 address."
+        return 1
+    fi
 }
 
 modify_dns_and_hosts() {
-    local IPv4_ADDR=$1
-    local IPv6_ADDR=$2
+    log 1 "Modifying DNS to use DNS64"
+    echo "nameserver 2606:4700:4700::64" | sudo tee /etc/resolv.conf > /dev/null
+    echo "nameserver 2001:4860:4860::64" | sudo tee -a /etc/resolv.conf > /dev/null
+    log 1 "DNS modified successfully."
 
-    if [[ -z "$IPv4_ADDR" && -n "$IPv6_ADDR" ]]; then
-        log 1 "Only IPv6 address exists, modifying DNS to DNS64"
-        echo "nameserver 2606:4700:4700::64" | sudo tee /etc/resolv.conf
-        echo "nameserver 2001:4860:4860::64" | sudo tee -a /etc/resolv.conf
-    fi
-
-    if [[ -n "$IPv6_ADDR" ]]; then
-        log 1 "IPv6 address detected, attempting to get Google IPv6 address and add to hosts file"
-        
-        local google_ipv6=$(get_google_ipv6)
-        
-        if [[ -n "$google_ipv6" ]]; then
-            log 1 "Choose operation:"
-            log 1 "1) Add this address to /etc/hosts"
-            log 1 "2) Use alternate address: 2606:4700:4700::6666 www.google.com"
-            log 1 "3) Exit script"
-            read -p "Enter option (1/2/3): " choice
-            
-            case $choice in
-                1)
-                    echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts
-                    log 1 "Google IPv6 address added to hosts file"
-                    ;;
-                2)
-                    echo "2606:4700:4700::6666 www.google.com" | sudo tee -a /etc/hosts
-                    log 1 "Alternate address added to hosts file"
-                    ;;
-                3)
-                    log 1 "Exiting script"
-                    exit 0
-                    ;;
-                *)
-                    log 0 "Invalid option, exiting script"
-                    exit 1
-                    ;;
-            esac
-        else
-            log 0 "Failed to obtain Google IPv6 address."
-        fi
+    local google_ipv6=$(get_google_ipv6)
+    if [[ -n "$google_ipv6" ]]; then
+        log 1 "Adding Google's IPv6 address to /etc/hosts"
+        echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts > /dev/null
+        log 1 "Hosts file updated successfully."
+    else
+        log 0 "Failed to add Google's IPv6 to hosts file."
     fi
 }
 
-# 使用示例
-IPv4_ADDR=""
-IPv6_ADDR="2001:db8::1"
-modify_dns_and_hosts "$IPv4_ADDR" "$IPv6_ADDR"
+main() {
+    log 1 "Starting IPv6 configuration script"
+
+    if ! check_ipv6_support; then
+        log 0 "Exiting due to lack of IPv6 support."
+        exit 1
+    fi
+
+    local current_ipv6=$(get_current_ipv6)
+    if [[ -z "$current_ipv6" ]]; then
+        log 0 "No IPv6 address available. Please check your network configuration."
+        exit 1
+    fi
+
+    if ! test_ipv6_connectivity; then
+        log 1 "IPv6 connectivity issue detected. Attempting to modify DNS and hosts."
+        modify_dns_and_hosts
+    else
+        log 1 "IPv6 is working correctly. No changes needed."
+    fi
+
+    log 1 "Script execution completed."
+}
+
+main
