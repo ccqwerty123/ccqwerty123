@@ -68,6 +68,7 @@ clean_directory() {
 }
 
 # 使用 IPv6 地址下载文件并测试速度
+# 使用 IPv6 地址下载文件并测试速度
 download_with_ipv6() {
     local ipv6_address="$1"
     local url="$2"
@@ -91,7 +92,6 @@ download_with_ipv6() {
     # 清理下载目录
     clean_directory "$download_dir"
 }
-
 # 主程序
 main() {
     install_tools
