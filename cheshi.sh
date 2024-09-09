@@ -12,25 +12,35 @@ log() {
 }
 
 get_google_ipv6() {
-    local ipv6_regex="^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
+    # 更灵活的IPv6正则表达式
+    local ipv6_regex="([0-9a-fA-F]{1,4}:){1,7}([0-9a-fA-F]{1,4}|:)"
     local google_ipv6=""
-    local timeout=5
+    local timeout=10
 
     local methods=(
-        "dig aaaa google.com +short | grep -E \"$ipv6_regex\" | head -n 1"
-        "curl -6 -s 'https://ifconfig.co' | grep -Eo \"$ipv6_regex\" | head -n 1"
-        "wget -6 -qO - 'https://ifconfig.co' | grep -Eo \"$ipv6_regex\" | head -n 1"
+        "dig aaaa google.com +short"
+        "curl -6 -s 'https://ifconfig.co'"
+        "wget -6 -qO - 'https://ifconfig.co'"
         "ping6 -c 1 google.com 2>&1 | grep 'from' | sed 's/.*from \([0-9a-fA-F:]*\).*/\1/'"
-        "getent hosts google.com | grep -Eo \"$ipv6_regex\" | head -n 1"
+        "getent hosts google.com"
     )
 
     for method in "${methods[@]}"; do
         log 2 "Trying method: $method"
-        google_ipv6=$(timeout $timeout bash -c "$method")
-        if [[ -n "$google_ipv6" ]]; then
-            log 1 "Google IPv6 address obtained: $google_ipv6"
-            echo "$google_ipv6"
-            return 0
+        local result=$(timeout $timeout bash -c "$method")
+        log 2 "Raw result: $result"
+        
+        if [[ -n "$result" ]]; then
+            google_ipv6=$(echo "$result" | grep -oE "$ipv6_regex" | head -n 1)
+            if [[ -n "$google_ipv6" ]]; then
+                log 1 "Google IPv6 address obtained: $google_ipv6"
+                echo "$google_ipv6"
+                return 0
+            else
+                log 2 "No valid IPv6 address found in the result"
+            fi
+        else
+            log 2 "Method returned empty result"
         fi
     done
 
@@ -56,7 +66,7 @@ modify_dns_and_hosts() {
         if [[ -n "$google_ipv6" ]]; then
             log 1 "Choose operation:"
             log 1 "1) Add this address to /etc/hosts"
-            log 1 "2) Use alternate address: 2607:f8b0:4004:c19::6a www.google.com"
+            log 1 "2) Use alternate address: 2606:4700:4700::6666 www.google.com"
             log 1 "3) Exit script"
             read -p "Enter option (1/2/3): " choice
             
@@ -66,7 +76,7 @@ modify_dns_and_hosts() {
                     log 1 "Google IPv6 address added to hosts file"
                     ;;
                 2)
-                    echo "2607:f8b0:4004:c19::6a www.google.com" | sudo tee -a /etc/hosts
+                    echo "2606:4700:4700::6666 www.google.com" | sudo tee -a /etc/hosts
                     log 1 "Alternate address added to hosts file"
                     ;;
                 3)
