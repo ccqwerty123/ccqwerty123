@@ -99,4 +99,5 @@ modify_dns_and_hosts() {
     fi
 }
 
-modify_dns_and_hosts()
+# 调用函数
+modify_dns_and_hosts
