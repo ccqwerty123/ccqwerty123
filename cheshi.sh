@@ -1,99 +1,61 @@
 #!/bin/bash
 
-set -e
+# 检查并安装必要的工具
+install_tools() {
+    if ! command -v dig &> /dev/null; then
+        echo "未找到 dig，正在安装..."
+        sudo apt-get update
+        sudo apt-get install -y dnsutils
+    fi
 
-LOG_LEVEL=2  # 0=ERROR, 1=INFO, 2=DEBUG
-
-log() {
-    local level=$1
-    local message=$2
-    if [[ $level -le $LOG_LEVEL ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >&2
+    if ! command -v nslookup &> /dev/null; then
+        echo "未找到 nslookup，正在安装..."
+        sudo apt-get update
+        sudo apt-get install -y dnsutils
     fi
 }
 
-check_ipv6_support() {
-    if [[ -f /proc/net/if_inet6 ]]; then
-        log 1 "IPv6 is supported on this system."
-        return 0
+# 查询 IPv6 地址的函数
+query_ipv6() {
+    local domain="$1"
+    local method="$2"
+    local ipv6_address=""
+
+    if [ "$method" == "dig" ]; then
+        ipv6_address=$(dig AAAA "$domain" +short)
+    elif [ "$method" == "nslookup" ]; then
+        ipv6_address=$(nslookup -query=AAAA "$domain" | grep 'address' | awk '{print $2}')
     else
-        log 0 "IPv6 is not supported on this system."
+        echo "不支持的查询方式: $method"
         return 1
     fi
-}
 
-get_current_ipv6() {
-    local ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+')
-    if [[ -n "$ipv6" ]]; then
-        log 1 "Current IPv6 address: $ipv6"
-        echo "$ipv6"
-        return 0
-    else
-        log 0 "No global IPv6 address found."
+    if [ -z "$ipv6_address" ]; then
+        echo "未找到 $domain 的 IPv6 地址"
         return 1
-    fi
-}
-
-test_ipv6_connectivity() {
-    if ping6 -c 3 google.com &> /dev/null; then
-        log 1 "IPv6 connectivity to google.com is working."
+    else
+        echo "$domain 的 IPv6 地址是: $ipv6_address"
         return 0
-    else
-        log 0 "Cannot reach google.com via IPv6."
-        return 1
     fi
 }
 
-get_google_ipv6() {
-    local google_ipv6=$(dig AAAA google.com +short)
-    if [[ -n "$google_ipv6" ]]; then
-        log 1 "Google's IPv6 address: $google_ipv6"
-        echo "$google_ipv6"
-        return 0
-    else
-        log 0 "Failed to get Google's IPv6 address."
-        return 1
-    fi
-}
-
-modify_dns_and_hosts() {
-    log 1 "Modifying DNS to use DNS64"
-    echo "nameserver 2606:4700:4700::64" | sudo tee /etc/resolv.conf > /dev/null
-    echo "nameserver 2001:4860:4860::64" | sudo tee -a /etc/resolv.conf > /dev/null
-    log 1 "DNS modified successfully."
-
-    local google_ipv6=$(get_google_ipv6)
-    if [[ -n "$google_ipv6" ]]; then
-        log 1 "Adding Google's IPv6 address to /etc/hosts"
-        echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts > /dev/null
-        log 1 "Hosts file updated successfully."
-    else
-        log 0 "Failed to add Google's IPv6 to hosts file."
-    fi
-}
-
+# 主程序
 main() {
-    log 1 "Starting IPv6 configuration script"
+    install_tools
 
-    if ! check_ipv6_support; then
-        log 0 "Exiting due to lack of IPv6 support."
-        exit 1
+    # 默认域名和查询方式
+    local domain="sohu.com"
+    local method="dig"  # 可选值: dig, nslookup
+
+    # 允许用户选择查询方式
+    read -p "请选择查询方式 (dig/nslookup)，默认是 dig: " user_method
+    if [[ "$user_method" == "dig" || "$user_method" == "nslookup" ]]; then
+        method="$user_method"
     fi
 
-    local current_ipv6=$(get_current_ipv6)
-    if [[ -z "$current_ipv6" ]]; then
-        log 0 "No IPv6 address available. Please check your network configuration."
-        exit 1
-    fi
-
-    if ! test_ipv6_connectivity; then
-        log 1 "IPv6 connectivity issue detected. Attempting to modify DNS and hosts."
-        modify_dns_and_hosts
-    else
-        log 1 "IPv6 is working correctly. No changes needed."
-    fi
-
-    log 1 "Script execution completed."
+    # 查询 IPv6 地址
+    query_ipv6 "$domain" "$method"
 }
 
+# 执行主程序
 main
