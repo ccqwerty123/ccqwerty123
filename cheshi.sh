@@ -22,7 +22,6 @@ is_valid_ipv6() {
 }
 
 # 获取域名的IPv6地址
-# 获取域名的IPv6地址
 get_ipv6_address() {
     local domain=$1
     local dns_server="2001:4860:4860::6464"  # 默认使用Google的DNS64服务器
