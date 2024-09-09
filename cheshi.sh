@@ -1,4 +1,6 @@
 #!/bin/sh
+export IPv4_ADDR=""  # 设置为空，表示没有IPv4地址
+export IPv6_ADDR="2001:db8::1"  # 设置为一个示例IPv6地址
 
 modify_dns_and_hosts() {
     ipv6_regex="^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
