@@ -143,7 +143,7 @@ modify_dns_and_hosts() {
             echo "请选择操作："
             echo "1) 将此地址添加到 /etc/hosts"
             echo "2) 使用备用地址：2607:f8b0:4004:c19::6a www.google.com"
-            echo "3) 退出脚本"
+            echo "3) 返回主菜单"
             read -p "请输入选项 (1/2/3): " choice
 
             case $choice in
@@ -156,12 +156,12 @@ modify_dns_and_hosts() {
                     echo "已将备用地址添加到hosts文件"
                     ;;
                 3)
-                    echo "退出脚本"
-                    exit 0
+                    echo "返回主菜单"
+                    return
                     ;;
                 *)
-                    echo "无效选项，退出脚本"
-                    exit 1
+                    echo "无效选项，请重新选择。"
+                    handle_google_ipv6 "$ipv6_address"
                     ;;
             esac
         }
@@ -169,6 +169,8 @@ modify_dns_and_hosts() {
         get_google_ipv6
     fi
 }
+
+
 
 manage_swap() {
     while true; do
