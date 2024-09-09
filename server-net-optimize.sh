@@ -83,58 +83,46 @@ modify_dns_and_hosts() {
             google_ipv6=""
 
             get_ipv6_with_nslookup() {
-                nslookup -type=AAAA google.com 2>/dev/null | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
+                result=$(nslookup -type=AAAA google.com 2>/dev/null)
+                echo "nslookup 结果: $result"
+                echo "$result" | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
             }
 
             get_ipv6_with_host() {
-                host -t AAAA google.com 2>/dev/null | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
+                result=$(host -t AAAA google.com 2>/dev/null)
+                echo "host 结果: $result"
+                echo "$result" | grep -E "$ipv6_regex" | awk '{print $NF}' | head -n 1
             }
 
             get_ipv6_with_dig() {
-                dig AAAA google.com +short 2>/dev/null | grep -E "$ipv6_regex" | head -n 1
+                result=$(dig AAAA google.com +short 2>/dev/null)
+                echo "dig 结果: $result"
+                echo "$result" | grep -E "$ipv6_regex" | head -n 1
             }
 
             get_ipv6_with_curl() {
-                curl -6 -s 'https://ipv6.icanhazip.com' 2>/dev/null | grep -E "$ipv6_regex"
+                result=$(curl -6 -s 'https://ipv6.icanhazip.com' 2>/dev/null)
+                echo "curl 结果: $result"
+                echo "$result" | grep -E "$ipv6_regex"
             }
 
             get_ipv6_with_wget() {
-                wget -6 -qO - 'https://ipv6.icanhazip.com' 2>/dev/null | grep -E "$ipv6_regex"
+                result=$(wget -6 -qO - 'https://ipv6.icanhazip.com' 2>/dev/null)
+                echo "wget 结果: $result"
+                echo "$result" | grep -E "$ipv6_regex"
             }
 
             # 尝试获取 IPv6 地址
             for method in get_ipv6_with_nslookup get_ipv6_with_host get_ipv6_with_dig get_ipv6_with_curl get_ipv6_with_wget; do
                 if command -v "${method#get_ipv6_with_}" > /dev/null; then
                     google_ipv6=$($method)
+                    echo "尝试的地址: $google_ipv6"
                     if [ -n "$google_ipv6" ]; then
                         echo "获取到的谷歌 IPv6 地址: $google_ipv6"
-                        
-                        echo "请选择操作："
-                        echo "1) 将此地址添加到 /etc/hosts"
-                        echo "2) 使用备用地址：2607:f8b0:4004:c19::6a www.google.com"
-                        echo "3) 退出脚本"
-                        read -p "请输入选项 (1/2/3): " choice
-
-                        case $choice in
-                            1)
-                                echo "$google_ipv6 google.com" | sudo tee -a /etc/hosts
-                                echo "已将Google IPv6地址添加到hosts文件"
-                                return
-                                ;;
-                            2)
-                                echo "2607:f8b0:4004:c19::6a www.google.com" | sudo tee -a /etc/hosts
-                                echo "已将备用地址添加到hosts文件"
-                                return
-                                ;;
-                            3)
-                                echo "退出脚本"
-                                exit 0
-                                ;;
-                            *)
-                                echo "无效选项，退出脚本"
-                                exit 1
-                                ;;
-                        esac
+                        handle_google_ipv6 "$google_ipv6"
+                        return
+                    else
+                        echo "使用 $method 未能获取到IPv6地址"
                     fi
                 fi
             done
@@ -150,10 +138,37 @@ modify_dns_and_hosts() {
             fi
         }
 
+        handle_google_ipv6() {
+            local ipv6_address="$1"
+            echo "请选择操作："
+            echo "1) 将此地址添加到 /etc/hosts"
+            echo "2) 使用备用地址：2607:f8b0:4004:c19::6a www.google.com"
+            echo "3) 退出脚本"
+            read -p "请输入选项 (1/2/3): " choice
+
+            case $choice in
+                1)
+                    echo "$ipv6_address google.com" | sudo tee -a /etc/hosts
+                    echo "已将Google IPv6地址添加到hosts文件"
+                    ;;
+                2)
+                    echo "2607:f8b0:4004:c19::6a www.google.com" | sudo tee -a /etc/hosts
+                    echo "已将备用地址添加到hosts文件"
+                    ;;
+                3)
+                    echo "退出脚本"
+                    exit 0
+                    ;;
+                *)
+                    echo "无效选项，退出脚本"
+                    exit 1
+                    ;;
+            esac
+        }
+
         get_google_ipv6
     fi
 }
-
 
 manage_swap() {
     while true; do
