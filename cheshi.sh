@@ -53,35 +53,48 @@ main() {
     install_tools
 
     while true; do
-        # 默认值
-        local domain="sohu.com"
-        local dns_server=""
-        local method="dig"  # 可选值: dig, nslookup
+        # 一级菜单：选择查询方式或退出
+        echo "请选择查询方式:"
+        echo "1) dig"
+        echo "2) nslookup"
+        echo "3) 退出"
+        read -p "请输入选项 (1/2/3): " method_choice
 
-        # 允许用户输入域名
+        case "$method_choice" in
+            1)
+                method="dig"
+                ;;
+            2)
+                method="nslookup"
+                ;;
+            3)
+                echo "退出程序。"
+                break
+                ;;
+            *)
+                echo "无效的选项，请重新选择。"
+                continue
+                ;;
+        esac
+
+        # 选择查询的域名
         read -p "请输入要查询的域名 (默认是 sohu.com): " user_domain
-        if [ -n "$user_domain" ]; then
-            domain="$user_domain"
-        fi
+        domain="${user_domain:-sohu.com}"
 
-        # 允许用户输入 DNS 服务器
+        # 选择 DNS 服务器
         read -p "请输入 DNS 服务器 (留空使用默认 DNS): " user_dns
-        if [ -n "$user_dns" ]; then
-            dns_server="$user_dns"
-        fi
-
-        # 允许用户选择查询方式
-        read -p "请选择查询方式 (dig/nslookup)，默认是 dig: " user_method
-        if [[ "$user_method" == "dig" || "$user_method" == "nslookup" ]]; then
-            method="$user_method"
-        fi
+        dns_server="$user_dns"
 
         # 查询 IPv6 地址
         query_ipv6 "$domain" "$dns_server" "$method"
 
         # 询问用户是否继续查询
-        read -p "是否继续查询? (y/n): " continue_choice
-        if [[ "$continue_choice" != "y" && "$continue_choice" != "Y" ]]; then
+        echo "是否继续查询?"
+        echo "1) 是"
+        echo "2) 否"
+        read -p "请输入选项 (1/2): " continue_choice
+
+        if [ "$continue_choice" != "1" ]; then
             echo "退出程序。"
             break
         fi
