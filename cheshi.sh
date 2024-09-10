@@ -37,18 +37,34 @@ replace_domain_with_ipv6() {
     echo "${protocol}[${ipv6}]/${path}"
 }
 
-# 下载文件并计算下载速度
+# 下载文件并实时显示下载速度，限制下载时间
 download_file() {
     local url=$1
+    local duration=60  # 下载时间限制为60秒
+    local temp_file=$(mktemp)
     local start=$(date +%s.%N)
-    local size=$(curl -s -L -o /dev/null -w "%{size_download}" "$url")
+
+    # 使用 timeout 限制下载时间
+    timeout $duration curl -L -o "$temp_file" --progress-bar "$url" &
+    local pid=$!
+
+    while kill -0 $pid 2>/dev/null; do
+        sleep 1
+        local current_size=$(stat -c%s "$temp_file")
+        local current_time=$(date +%s.%N)
+        local elapsed=$(echo "$current_time - $start" | bc)
+        local speed=$(echo "scale=2; $current_size / $elapsed / 1024 / 1024" | bc)
+        echo -ne "下载速度: ${speed} MB/s\r"
+    done
+
+    wait $pid
+    local final_size=$(stat -c%s "$temp_file")
     local end=$(date +%s.%N)
-    local duration=$(echo "$end - $start" | bc)
-    if [ -z "$size" ] || [ -z "$duration" ] || [ $(echo "$duration == 0" | bc) -eq 1 ]; then
-        echo "error"
-    else
-        echo "scale=2; $size / $duration / 1024 / 1024" | bc
-    fi
+    local total_time=$(echo "$end - $start" | bc)
+    local final_speed=$(echo "scale=2; $final_size / $total_time / 1024 / 1024" | bc)
+    echo -e "\n下载完成，平均速度: ${final_speed} MB/s"
+
+    rm -f "$temp_file"
 }
 
 main() {
@@ -70,12 +86,7 @@ main() {
     ipv6_url=$(replace_domain_with_ipv6 $url $ipv6_address)
     echo "IPv6 URL: $ipv6_url"
     
-    speed=$(download_file $ipv6_url)
-    if [ "$speed" = "error" ]; then
-        echo "下载测试失败"
-    else
-        echo "下载速度: ${speed} MB/s"
-    fi
+    download_file $ipv6_url
 }
 
 main
