@@ -212,42 +212,87 @@ validate_input() {
 }
 
 manage_swap_space() {
+    # 显示菜单并获取用户输入
     echo -e "\n选择交换空间操作：\n1) 创建交换空间\n2) 删除交换空间"
     read -rp "输入选项编号: " swap_choice
 
+    # 根据用户输入执行相应操作
     case $swap_choice in
         1)
-            read -rp "输入交换文件路径（默认 /swapfile）: " swapfile
-            swapfile=${swapfile:-/swapfile}
-            size=$(validate_input "输入交换文件大小（MB）" 1024 1 1048576)
-
-            if [[ -f "$swapfile" ]]; then
-                echo "错误：交换文件 $swapfile 已存在"; return 1
-            fi
-
-            # 创建交换文件
-            sudo dd if=/dev/zero of="$swapfile" bs=1M count="$size" status=progress
-            sudo chmod 600 "$swapfile"
-            sudo mkswap "$swapfile" && sudo swapon "$swapfile"
-            echo "$swapfile none swap sw 0 0" | sudo tee -a /etc/fstab
-
-            echo "交换空间已创建并启用"
+            # 创建交换空间
+            create_swap_space
             ;;
         2)
-            current_swap=$(swapon --show=NAME --noheadings | grep '^/')
-            if [[ -z "$current_swap" ]]; then
-                echo "未找到任何启用的交换文件"; return 1
-            fi
-
-            sudo swapoff "$current_swap" && sudo rm -f "$current_swap"
-            sudo sed -i "\|$current_swap|d" /etc/fstab
-
-            echo "交换空间已关闭并删除"
+            # 删除交换空间
+            delete_swap_space
             ;;
         *)
+            # 无效选项
             echo "无效选项，请重新选择"
             ;;
     esac
+}
+
+create_swap_space() {
+    # 获取交换文件路径和大小
+    read -rp "输入交换文件路径（默认 /swapfile）: " swapfile
+    swapfile=${swapfile:-/swapfile}
+    size=$(validate_input "输入交换文件大小（MB）" 1024 1 1048576)
+
+    # 检查交换文件是否已存在
+    if [[ -f "$swapfile" ]]; then
+        # 如果交换文件已存在，尝试删除它
+        echo "检测到交换文件 $swapfile 已存在，尝试删除..."
+        sudo rm -f "$swapfile"
+        if [[ $? -ne 0 ]]; then
+            echo "错误：无法删除交换文件 $swapfile"
+            return 1
+        fi
+    fi
+
+    # 检查交换文件是否在 /etc/fstab 中
+    if grep -q "$swapfile" /etc/fstab; then
+        # 如果交换文件在 /etc/fstab 中，尝试删除它
+        echo "检测到交换文件 $swapfile 在 /etc/fstab 中，尝试删除..."
+        sudo sed -i "\|$swapfile|d" /etc/fstab
+        if [[ $? -ne 0 ]]; then
+            echo "错误：无法删除交换文件 $swapfile 从 /etc/fstab"
+            return 1
+        fi
+    fi
+
+    # 创建交换文件
+    sudo dd if=/dev/zero of="$swapfile" bs=1M count="$size" status=progress
+    if [[ $? -ne 0 ]]; then
+        echo "错误：无法创建交换文件 $swapfile"
+        return 1
+    fi
+
+    # 设置交换文件权限
+    sudo chmod 600 "$swapfile"
+    # 启用交换文件
+    sudo mkswap "$swapfile" && sudo swapon "$swapfile"
+    # 将交换文件添加到 /etc/fstab
+    echo "$swapfile none swap sw 0 0" | sudo tee -a /etc/fstab
+
+    echo "交换空间已创建并启用"
+}
+
+delete_swap_space() {
+    # 获取当前启用的交换文件
+    current_swap=$(swapon --show=NAME --noheadings | grep '^/')
+
+    # 检查是否有启用的交换文件
+    if [[ -z "$current_swap" ]]; then
+        echo "未找到任何启用的交换文件"; return 1
+    fi
+
+    # 关闭和删除交换文件
+    sudo swapoff "$current_swap" && sudo rm -f "$current_swap"
+    # 将交换文件从 /etc/fstab 中删除
+    sudo sed -i "\|$current_swap|d" /etc/fstab
+
+    echo "交换空间已关闭并删除"
 }
 
 set_kernel_parameters() {
