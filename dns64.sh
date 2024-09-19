@@ -1,21 +1,31 @@
 #!/bin/bash
 
+set -e
+
 # 设置下载测试的 URL 和测试时间（秒）
 TEST_URL="https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
 TEST_DURATION=10
 
 # 从 GitHub 获取 DNS64 服务器列表
 get_dns64_servers() {
-    local url="https://github.com/ccqwerty123/ccqwerty123/blob/main/dns64.txt"
+    local url="https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/dns64.txt"
+    local content
+
     if command -v curl &> /dev/null; then
-        curl -s "$url" | grep -v '^#' | awk '{print $1}'
+        content=$(curl -s "$url")
     elif command -v wget &> /dev/null; then
-        wget -qO- "$url" | grep -v '^#' | awk '{print $1}'
+        content=$(wget -qO- "$url")
     else
         echo "Error: Neither curl nor wget is available." >&2
-        echo "2001:4860:4860::6464"  # 返回默认的 Google DNS64 服务器
-        echo "2001:4860:4860::64"
+        return 1
     fi
+
+    if [ -z "$content" ]; then
+        echo "Error: Failed to fetch DNS64 server list." >&2
+        return 1
+    fi
+
+    echo "$content" | grep -v '^#' | awk '{print $1}' | grep -E '^[0-9a-fA-F:]+$'
 }
 
 # 检查是否有原生 IPv6 地址
@@ -70,9 +80,11 @@ test_download_speed() {
     local ipv6_url=$(echo "$url" | sed -E "s#https?://$domain#&/\[$ipv6_address\]#")
 
     if command -v curl &> /dev/null; then
-        curl -g -6 -o /dev/null -m "$duration" -w "%{speed_download}" "$ipv6_url" 2>/dev/null
+        local speed=$(curl -g -6 -o /dev/null -m "$duration" -w "%{speed_download}" "$ipv6_url" 2>/dev/null)
+        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
     elif command -v wget &> /dev/null; then
-        wget -6 -O /dev/null "$ipv6_url" 2>&1 | grep -i "avg. speed" | awk '{print $(NF-1) * 8}'
+        local speed=$(wget -6 -O /dev/null "$ipv6_url" 2>&1 | grep -i "avg. speed" | awk '{print $(NF-1) * 8}')
+        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
     else
         echo "Error: Neither curl nor wget is available for download speed test." >&2
         echo "0"
@@ -87,6 +99,11 @@ main() {
     fi
 
     local dns64_servers=($(get_dns64_servers))
+    if [ ${#dns64_servers[@]} -eq 0 ]; then
+        echo "Error: No valid DNS64 servers found. Using default servers."
+        dns64_servers=("2001:4860:4860::6464" "2001:4860:4860::64")
+    fi
+
     local fastest_dns=""
     local highest_speed=0
 
@@ -99,7 +116,6 @@ main() {
         fi
 
         local speed=$(test_download_speed "$TEST_URL" "$ipv6_address" "$TEST_DURATION")
-        speed=$(echo "$speed / 1000000" | bc -l)  # 转换为 Mbps
         echo "Download speed: $speed Mbps"
 
         if (( $(echo "$speed > $highest_speed" | bc -l) )); then
