@@ -6,10 +6,22 @@ set -e
 TEST_URL="https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
 TEST_DURATION=10
 
+# 启用调试模式
+DEBUG=true
+
+# 调试输出函数
+debug() {
+    if [ "$DEBUG" = true ]; then
+        echo "[DEBUG] $1" >&2
+    fi
+}
+
 # 从 GitHub 获取 DNS64 服务器列表
 get_dns64_servers() {
     local url="https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/dns64.txt"
     local content
+
+    debug "Fetching DNS64 server list from $url"
 
     if command -v curl &> /dev/null; then
         content=$(curl -s "$url")
@@ -25,7 +37,14 @@ get_dns64_servers() {
         return 1
     fi
 
-    echo "$content" | grep -v '^#' | awk '{print $1}' | grep -E '^[0-9a-fA-F:]+$'
+    debug "Raw content from GitHub:"
+    debug "$content"
+
+    local servers=$(echo "$content" | grep -v '^#' | awk '{print $1}' | grep -E '^[0-9a-fA-F:]+$')
+    debug "Parsed DNS64 servers:"
+    debug "$servers"
+
+    echo "$servers"
 }
 
 # 检查是否有原生 IPv6 地址
@@ -33,16 +52,27 @@ has_native_ipv6() {
     local domain=$(echo "$1" | sed -E 's#https?://##' | cut -d'/' -f1)
     local non_dns64_server="8.8.8.8"
 
+    debug "Checking for native IPv6 for domain: $domain"
+
     if command -v dig &> /dev/null; then
-        if dig AAAA "$domain" @"$non_dns64_server" +short | grep -q '^[0-9a-fA-F:]\+$'; then
+        debug "Using dig for IPv6 check"
+        local result=$(dig AAAA "$domain" @"$non_dns64_server" +short)
+        debug "dig result: $result"
+        if echo "$result" | grep -q '^[0-9a-fA-F:]\+$'; then
             return 0
         fi
     elif command -v nslookup &> /dev/null; then
-        if nslookup -type=AAAA "$domain" "$non_dns64_server" | grep -q 'has AAAA address'; then
+        debug "Using nslookup for IPv6 check"
+        local result=$(nslookup -type=AAAA "$domain" "$non_dns64_server")
+        debug "nslookup result: $result"
+        if echo "$result" | grep -q 'has AAAA address'; then
             return 0
         fi
     elif command -v host &> /dev/null; then
-        if host -t AAAA "$domain" "$non_dns64_server" | grep -q 'has IPv6 address'; then
+        debug "Using host for IPv6 check"
+        local result=$(host -t AAAA "$domain" "$non_dns64_server")
+        debug "host result: $result"
+        if echo "$result" | grep -q 'has IPv6 address'; then
             return 0
         fi
     else
@@ -58,16 +88,30 @@ get_synthesized_ipv6() {
     local domain=$(echo "$1" | sed -E 's#https?://##' | cut -d'/' -f1)
     local dns64_server="$2"
 
+    debug "Getting synthesized IPv6 for domain: $domain using DNS64 server: $dns64_server"
+
+    local result
     if command -v dig &> /dev/null; then
-        dig AAAA "$domain" @"$dns64_server" +short | grep '^[0-9a-fA-F:]\+$' | head -n1
+        debug "Using dig for synthesized IPv6"
+        result=$(dig AAAA "$domain" @"$dns64_server" +short)
     elif command -v nslookup &> /dev/null; then
-        nslookup -type=AAAA "$domain" "$dns64_server" | grep 'has AAAA address' | awk '{print $NF}' | head -n1
+        debug "Using nslookup for synthesized IPv6"
+        result=$(nslookup -type=AAAA "$domain" "$dns64_server")
     elif command -v host &> /dev/null; then
-        host -t AAAA "$domain" "$dns64_server" | grep 'has IPv6 address' | awk '{print $NF}' | head -n1
+        debug "Using host for synthesized IPv6"
+        result=$(host -t AAAA "$domain" "$dns64_server")
     else
         echo "Error: No suitable DNS query tool found (dig, nslookup, or host)." >&2
         return 1
     fi
+
+    debug "Raw result from DNS query:"
+    debug "$result"
+
+    local ipv6_address=$(echo "$result" | grep -E '^[0-9a-fA-F:]+$' | head -n1)
+    debug "Extracted IPv6 address: $ipv6_address"
+
+    echo "$ipv6_address"
 }
 
 # 测试下载速度
@@ -79,15 +123,40 @@ test_download_speed() {
     local domain=$(echo "$url" | sed -E 's#https?://##' | cut -d'/' -f1)
     local ipv6_url=$(echo "$url" | sed -E "s#https?://$domain#&/\[$ipv6_address\]#")
 
+    debug "Testing download speed for URL: $ipv6_url"
+    debug "Test duration: $duration seconds"
+
+    local speed=0
+    local error_message=""
+
     if command -v curl &> /dev/null; then
-        local speed=$(curl -g -6 -o /dev/null -m "$duration" -w "%{speed_download}" "$ipv6_url" 2>/dev/null)
-        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
+        debug "Using curl for download test"
+        local curl_output=$(curl -g -6 -o /dev/null -m "$duration" -w "%{speed_download}\n%{http_code}" "$ipv6_url" 2>&1)
+        speed=$(echo "$curl_output" | head -n1)
+        local http_code=$(echo "$curl_output" | tail -n1)
+        debug "Curl output: $curl_output"
+        debug "HTTP status code: $http_code"
+        if [ "$http_code" != "200" ]; then
+            error_message="HTTP error: $http_code"
+        fi
     elif command -v wget &> /dev/null; then
-        local speed=$(wget -6 -O /dev/null "$ipv6_url" 2>&1 | grep -i "avg. speed" | awk '{print $(NF-1) * 8}')
-        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
+        debug "Using wget for download test"
+        local wget_output=$(wget -6 -O /dev/null "$ipv6_url" 2>&1)
+        debug "Wget output: $wget_output"
+        speed=$(echo "$wget_output" | grep -i "avg. speed" | awk '{print $(NF-1) * 8}')
+        if [ -z "$speed" ]; then
+            error_message="Failed to parse wget output"
+        fi
     else
         echo "Error: Neither curl nor wget is available for download speed test." >&2
+        return 1
+    fi
+
+    if [ -n "$error_message" ]; then
+        echo "Error: $error_message" >&2
         echo "0"
+    else
+        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
     fi
 }
 
@@ -115,6 +184,7 @@ main() {
             continue
         fi
 
+        echo "Synthesized IPv6 address: $ipv6_address"
         local speed=$(test_download_speed "$TEST_URL" "$ipv6_address" "$TEST_DURATION")
         echo "Download speed: $speed Mbps"
 
