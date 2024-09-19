@@ -2,7 +2,7 @@
 
 # 指定要查询的域名和 DNS 服务器
 domains=("dldir1.qq.com" "dlied4.csy.tcdnos.com" "vipspeedtest8.wuhan.net.cn")
-dns_server="8.8.8.8"  # 默认使用 Google 的 DNS 服务器
+dns_server="2001:4860:4860::6464"  # 默认使用 Google 的 DNS 服务器
 
 # 如果要指定其他 DNS 服务器，可以修改上面的 dns_server 变量
 
