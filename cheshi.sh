@@ -3,7 +3,7 @@
 # 设置变量
 DOMAIN="dldir1.qq.com"
 FILE_PATH="/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
-DOWNLOAD_TIME=10  # 指定下载时间（秒）
+DOWNLOAD_TIME=300  # 指定下载时间（秒）
 MAX_RETRIES=3
 RETRY_DELAY=5
 
