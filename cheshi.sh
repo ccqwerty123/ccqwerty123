@@ -1,52 +1,43 @@
 #!/bin/bash
 
-# 设置变量
-URL="https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
-DOMAIN="dldir1.qq.com"
-IPV6_ADDRESSES=("64:ff9b::cbcd:89eb" "64:ff9b::cbcd:89ea")
-TEST_DURATION=10
+# 检查 IPv6 地址连接性的函数
+check_ipv6_connectivity() {
+    local ipv6=$1
+    local timeout=5  # 设置超时时间为 5 秒
 
-# 测试函数
-test_download() {
-    local method=$1
-    local ipv6=$2
-    local cmd=$3
-    
-    echo "使用方法 $method 测试 IPv6 地址: $ipv6"
-    eval "$cmd"
-    echo "------------------------"
-}
-
-# 清理函数
-cleanup() {
-    rm -f /tmp/test_download
-    [ -n "$HOSTS_MODIFIED" ] && sed -i "/$DOMAIN/d" /etc/hosts
-}
-
-trap cleanup EXIT
-
-# 测试循环
-for ipv6 in "${IPV6_ADDRESSES[@]}"; do
-    # 方法1：直接使用 IPv6 地址
-    test_download "直接 IPv6" "$ipv6" "curl -6 -m $TEST_DURATION -o /tmp/test_download -w 'Speed: %{speed_download} bytes/sec\n' 'https://[$ipv6]/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe'"
-
-    # 方法2：使用 Host 头
-    test_download "Host 头" "$ipv6" "curl -6 -H 'Host: $DOMAIN' -m $TEST_DURATION -o /tmp/test_download -w 'Speed: %{speed_download} bytes/sec\n' 'https://[$ipv6]/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe'"
-
-    # 方法3：修改 /etc/hosts 文件
-    echo "$ipv6 $DOMAIN" >> /etc/hosts
-    HOSTS_MODIFIED=1
-    test_download "hosts 文件" "$ipv6" "curl -6 -m $TEST_DURATION -o /tmp/test_download -w 'Speed: %{speed_download} bytes/sec\n' '$URL'"
-    sed -i "/$DOMAIN/d" /etc/hosts
-    HOSTS_MODIFIED=
-
-    # 方法4：使用 wget
-    test_download "wget" "$ipv6" "wget -6 -O /tmp/test_download '$URL' 2>&1 | grep 'average speed'"
-
-    # 方法5：使用 aria2c
-    if command -v aria2c &> /dev/null; then
-        test_download "aria2c" "$ipv6" "aria2c -x16 -s16 --summary-interval=1 -d /tmp -o test_download '$URL'"
+    # 使用 nc (netcat) 检查连接性
+    if nc -z -v -w $timeout "$ipv6" 443 &>/dev/null; then
+        echo "IPv6 地址 $ipv6 可以连接"
+        return 0
     else
-        echo "aria2c 未安装，跳过此测试"
+        echo "IPv6 地址 $ipv6 无法连接"
+        return 1
     fi
-done
+}
+
+# 测试下载的函数
+test_download() {
+    local ipv6=$1
+    local url="https://[$ipv6]/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
+    local timeout=30
+
+    echo "测试下载：$url"
+    curl -6 -m $timeout -o /dev/null -w "下载速度: %{speed_download} bytes/sec\n" -H "Host: dldir1.qq.com" "$url"
+}
+
+# 主函数
+main() {
+    local ipv6_addresses=("64:ff9b::cbcd:89eb" "64:ff9b::cbcd:89ea")
+
+    for ipv6 in "${ipv6_addresses[@]}"; do
+        if check_ipv6_connectivity "$ipv6"; then
+            test_download "$ipv6"
+        else
+            echo "跳过不可连接的地址 $ipv6"
+        fi
+        echo "------------------------"
+    done
+}
+
+# 运行主函数
+main
