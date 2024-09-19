@@ -15,20 +15,23 @@ test_download() {
 
     for ((i=1; i<=MAX_RETRIES; i++)); do
         echo "下载尝试 $i/$MAX_RETRIES"
-        
-        # 下载指定时间
-        response=$(curl -6 -o QQ9.7.17.29225.exe -H "Host: $DOMAIN" --max-time $DOWNLOAD_TIME "$url")
 
-        if [ $? -eq 0 ]; then
-            # 计算下载文件大小
-            downloaded_size=$(stat -c%s "QQ9.7.17.29225.exe")
+        # 使用 --max-time 下载指定时间的文件
+        curl -6 -o QQ9.7.17.29225.exe -H "Host: $DOMAIN" --max-time $DOWNLOAD_TIME "$url"
+        
+        # 检查下载的文件大小
+        downloaded_size=$(stat -c%s "QQ9.7.17.29225.exe" 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ "$downloaded_size" -gt 0 ]; then
             echo "下载成功: $downloaded_size 字节"
             speed=$(echo "scale=2; $downloaded_size / $DOWNLOAD_TIME" | bc)
             echo "下载时间: $DOWNLOAD_TIME 秒, 速度: $speed 字节/秒"
             return 0
         else
-            echo "下载失败，错误: $?"
+            echo "下载失败，未下载到有效数据。"
             [ $i -lt $MAX_RETRIES ] && sleep $RETRY_DELAY
+            # 删除已下载的文件以便重新下载
+            rm -f QQ9.7.17.29225.exe
         fi
     done
 
