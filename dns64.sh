@@ -1,10 +1,17 @@
 #!/bin/bash
-
 set -e
 
-# 设置下载测试的 URL 和测试时间（秒）
-TEST_URL="https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
+# 设置下载测试的默认 URL 和测试时间（秒）
+DEFAULT_TEST_URL="https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
 TEST_DURATION=10
+
+# 纯 IPv4 网址列表
+IPV4_WEBSITES=(
+    "www.example.com"
+    "ipv4.google.com"
+    "ipv4only.arpa"
+    "d.root-servers.net"
+)
 
 # 启用调试模式
 DEBUG=true
@@ -16,191 +23,290 @@ debug() {
     fi
 }
 
+# 检测操作系统类型
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+    elif type lsb_release >/dev/null 2>&1; then
+        OS=$(lsb_release -si)
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        OS=$DISTRIB_ID
+    elif [ -f /etc/debian_version ]; then
+        OS=Debian
+    elif [ -f /etc/redhat-release ]; then
+        OS=RedHat
+    else
+        OS=$(uname -s)
+    fi
+}
+
+# 清除DNS缓存
+clear_dns_cache() {
+    detect_os
+    case $OS in
+        Ubuntu|Debian)
+            sudo systemd-resolve --flush-caches
+            ;;
+        CentOS|RedHat)
+            sudo systemctl restart NetworkManager
+            ;;
+        MacOS|Darwin)
+            sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+            ;;
+        *)
+            echo "未知操作系统，无法清除DNS缓存"
+            ;;
+    esac
+    echo "DNS缓存已清除"
+}
+
 # 从 GitHub 获取 DNS64 服务器列表
 get_dns64_servers() {
     local url="https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/dns64.txt"
     local content
-
-    debug "获取DNS64服务器列表，URL: $url"
-
+    debug "Fetching DNS64 server list from $url"
     if command -v curl &> /dev/null; then
         content=$(curl -s "$url")
     elif command -v wget &> /dev/null; then
         content=$(wget -qO- "$url")
     else
-        echo "错误：未找到 curl 或 wget。" >&2
+        echo "Error: Neither curl nor wget is available." >&2
         return 1
     fi
-
     if [ -z "$content" ]; then
-        echo "错误：无法获取DNS64服务器列表。" >&2
+        echo "Error: Failed to fetch DNS64 server list." >&2
         return 1
     fi
-
-    debug "从GitHub获取的原始内容："
+    debug "Raw content from GitHub:"
     debug "$content"
-
     local servers=$(echo "$content" | grep -v '^#' | awk '{print $1}' | grep -E '^[0-9a-fA-F:]+$')
-    debug "解析后的DNS64服务器："
+    debug "Parsed DNS64 servers:"
     debug "$servers"
-
     echo "$servers"
 }
 
-# 检查是否有原生 IPv6 地址
-get_native_ipv6() {
-    local domain=$(echo "$1" | sed -E 's#https?://##' | cut -d'/' -f1)
-    local non_dns64_server="8.8.8.8"
-
-    debug "检查域名 $domain 是否有原生IPv6地址"
-
-    local ipv6_address=""
-    if command -v dig &> /dev/null; then
-        debug "使用 dig 查询IPv6地址"
-        ipv6_address=$(dig AAAA "$domain" @"$non_dns64_server" +short | grep -E '^[0-9a-fA-F:]+$' | head -n1)
-    elif command -v nslookup &> /dev/null; then
-        debug "使用 nslookup 查询IPv6地址"
-        ipv6_address=$(nslookup -type=AAAA "$domain" "$non_dns64_server" | grep 'has AAAA address' | awk '{print $NF}')
-    elif command -v host &> /dev/null; then
-        debug "使用 host 查询IPv6地址"
-        ipv6_address=$(host -t AAAA "$domain" "$non_dns64_server" | grep 'has IPv6 address' | awk '{print $NF}')
-    else
-        echo "错误：未找到合适的DNS查询工具（dig、nslookup 或 host）。" >&2
-        return 1
-    fi
-
-    if [ -n "$ipv6_address" ]; then
-        debug "域名 $domain 有原生IPv6地址：$ipv6_address"
-        echo "$ipv6_address"
-        return 0
-    else
-        debug "域名 $domain 没有原生IPv6地址，需要使用DNS64服务器合成IPv6地址"
-        return 1
-    fi
+# 测试DNS解析速度
+test_dns_resolution_speed() {
+    local domain="$1"
+    local dns_server="$2"
+    local start_time=$(date +%s.%N)
+    dig AAAA "$domain" @"$dns_server" +short > /dev/null 2>&1
+    local end_time=$(date +%s.%N)
+    echo "$(echo "$end_time - $start_time" | bc) seconds"
 }
 
-# 获取合成的 IPv6 地址
-get_synthesized_ipv6() {
-    local domain=$(echo "$1" | sed -E 's#https?://##' | cut -d'/' -f1)
-    local dns64_server="$2"
-
-    debug "使用DNS64服务器 $dns64_server 获取域名 $domain 的合成IPv6地址"
-
-    local result
-    if command -v dig &> /dev/null; then
-        debug "使用 dig 查询合成IPv6地址"
-        result=$(dig AAAA "$domain" @"$dns64_server" +short)
-    elif command -v nslookup &> /dev/null; then
-        debug "使用 nslookup 查询合成IPv6地址"
-        result=$(nslookup -type=AAAA "$domain" "$dns64_server" | grep 'has AAAA address' | awk '{print $NF}')
-    elif command -v host &> /dev/null; then
-        debug "使用 host 查询合成IPv6地址"
-        result=$(host -t AAAA "$domain" "$dns64_server" | grep 'has IPv6 address' | awk '{print $NF}')
-    else
-        echo "错误：未找到合适的DNS查询工具（dig、nslookup 或 host）。" >&2
+# 测试NAT64连接性
+test_nat64_connectivity() {
+    local ipv4_addr="$1"
+    local dns_server="$2"
+    local ipv6_addr=$(dig AAAA "$ipv4_addr" @"$dns_server" +short)
+    if [ -z "$ipv6_addr" ]; then
+        echo "Failed to get IPv6 address for $ipv4_addr"
         return 1
     fi
-
-    debug "DNS查询原始结果："
-    debug "$result"
-
-    local ipv6_address=$(echo "$result" | grep -E '^[0-9a-fA-F:]+$' | head -n1)
-    debug "提取的IPv6地址：$ipv6_address"
-
-    echo "$ipv6_address"
+    if ping6 -c 1 -W 2 "$ipv6_addr" > /dev/null 2>&1; then
+        echo "NAT64 connectivity successful for $ipv4_addr"
+        return 0
+    else
+        echo "NAT64 connectivity failed for $ipv4_addr"
+        return 1
+    fi
 }
 
 # 测试下载速度
 test_download_speed() {
     local url="$1"
-    local ipv6_address="$2"
-    local duration="$3"
+    local duration="$2"
+    local temp_file=$(mktemp)
+    curl -s -o "$temp_file" "$url" &
+    local pid=$!
+    sleep "$duration"
+    kill $pid 2>/dev/null
+    local file_size=$(stat -c %s "$temp_file")
+    rm -f "$temp_file"
+    echo "scale=2; $file_size * 8 / (1024 * 1024 * $duration)" | bc
+}
 
-    local domain=$(echo "$url" | sed -E 's#https?://##' | cut -d'/' -f1)
-    local ipv6_url=$(echo "$url" | sed -E "s#https?://$domain#https://[$ipv6_address]#")
+# 备份当前DNS设置
+backup_dns() {
+    cp /etc/resolv.conf /etc/resolv.conf.backup
+    echo "Current DNS settings backed up to /etc/resolv.conf.backup"
+}
 
-    debug "测试下载速度，URL: $ipv6_url"
-    debug "测试持续时间: $duration 秒"
-
-    local speed=0
-    local error_message=""
-
-    if command -v curl &> /dev/null; then
-        debug "使用 curl 进行下载测试"
-        local curl_output=$(curl -g -6 -o /dev/null -m "$duration" -w "%{speed_download}\n%{http_code}" "$ipv6_url" 2>&1)
-        speed=$(echo "$curl_output" | head -n1)
-        local http_code=$(echo "$curl_output" | tail -n1)
-        debug "Curl 输出: $curl_output"
-        debug "HTTP 状态码: $http_code"
-        if [ "$http_code" != "200" ]; then
-            error_message="HTTP 错误: $http_code"
-        fi
-    elif command -v wget &> /dev/null; then
-        debug "使用 wget 进行下载测试"
-        local wget_output=$(wget -6 -O /dev/null "$ipv6_url" 2>&1)
-        debug "Wget 输出: $wget_output"
-        speed=$(echo "$wget_output" | grep -i "avg. speed" | awk '{print $(NF-1) * 8}')
-        if [ -z "$speed" ]; then
-            error_message="无法解析 wget 输出"
-        fi
+# 恢复DNS设置
+restore_dns() {
+    if [ -f /etc/resolv.conf.backup ]; then
+        mv /etc/resolv.conf.backup /etc/resolv.conf
+        echo "DNS settings restored from backup"
     else
-        echo "错误：未找到 curl 或 wget 进行下载速度测试。" >&2
+        echo "No DNS backup found"
+    fi
+}
+
+# 修改DNS设置
+modify_dns() {
+    local dns_servers=("$@")
+    echo -n > /etc/resolv.conf
+    for dns in "${dns_servers[@]}"; do
+        echo "nameserver $dns" >> /etc/resolv.conf
+    done
+    if grep -q "nameserver $dns" /etc/resolv.conf; then
+        echo "DNS settings modified successfully"
+        clear_dns_cache
+        return 0
+    else
+        echo "Failed to modify DNS settings"
         return 1
     fi
-
-    if [ -n "$error_message" ]; then
-        echo "错误: $error_message" >&2
-        echo "0"
-    else
-        echo "$speed" | awk '{printf "%.2f\n", $1 / 1000000}'
-    fi
 }
 
-# 主函数
-main() {
-    debug "开始测试URL: $TEST_URL"
+# 主菜单
+main_menu() {
+    while true; do
+        echo -e "\n欢迎使用DNS64和NAT64测速脚本"
+        echo "该脚本可以测试DNS64服务器的解析速度、NAT64连接性和下载速度，并可以修改系统DNS设置。"
+        echo "请选择以下选项："
+        echo "1. 修改DNS并测速"
+        echo "2. 不修改DNS测速"
+        echo "3. 退出脚本"
+        read -p "请输入您的选择 (1-3): " choice
+        case $choice in
+            1) modify_dns_and_test ;;
+            2) test_without_modifying_dns ;;
+            3) echo "感谢使用，再见！"; exit 0 ;;
+            *) echo "无效的选择，请重试。" ;;
+        esac
+    done
+}
 
-    local native_ipv6=$(get_native_ipv6 "$TEST_URL")
-    if [ -n "$native_ipv6" ]; then
-        echo "URL $TEST_URL 已经有原生IPv6地址: $native_ipv6"
-        local speed=$(test_download_speed "$TEST_URL" "$native_ipv6" "$TEST_DURATION")
-        echo "原生IPv6下载速度: $speed Mbps"
-        exit 0
-    fi
-
+# 修改DNS并测速
+modify_dns_and_test() {
+    echo "您选择了修改DNS并测速"
+    echo "1. 测试DNS64解析速度和NAT64连接性"
+    echo "2. 测试DNS下载速度"
+    read -p "请选择测试类型 (1-2): " test_type
+    
+    backup_dns
+    
     local dns64_servers=($(get_dns64_servers))
     if [ ${#dns64_servers[@]} -eq 0 ]; then
-        echo "错误：未找到有效的DNS64服务器。使用默认服务器。"
+        echo "Error: No valid DNS64 servers found. Using default servers."
         dns64_servers=("2001:4860:4860::6464" "2001:4860:4860::64")
     fi
-
-    local fastest_dns=""
-    local highest_speed=0
-
-    for dns in "${dns64_servers[@]}"; do
-        echo "测试DNS64服务器: $dns"
-        local ipv6_address=$(get_synthesized_ipv6 "$TEST_URL" "$dns")
-        if [ -z "$ipv6_address" ]; then
-            echo "无法从 $dns 获取合成的IPv6地址"
-            continue
-        fi
-
-        echo "合成的IPv6地址: $ipv6_address"
-        local speed=$(test_download_speed "$TEST_URL" "$ipv6_address" "$TEST_DURATION")
-        echo "下载速度: $speed Mbps"
-
-        if (( $(echo "$speed > $highest_speed" | bc -l) )); then
-            highest_speed=$speed
-            fastest_dns=$dns
-        fi
+    
+    local best_dns=()
+    local best_speed=()
+    
+    case $test_type in
+        1)
+            echo "正在测试DNS64解析速度和NAT64连接性..."
+            for dns in "${dns64_servers[@]}"; do
+                if ! modify_dns "$dns"; then
+                    continue
+                fi
+                local avg_speed=0
+                local nat64_success=0
+                for website in "${IPV4_WEBSITES[@]}"; do
+                    for i in {1..3}; do
+                        local speed=$(test_dns_resolution_speed "$website" "$dns")
+                        avg_speed=$(echo "$avg_speed + $speed" | bc)
+                    done
+                    if test_nat64_connectivity "$website" "$dns"; then
+                        nat64_success=$((nat64_success + 1))
+                    fi
+                done
+                avg_speed=$(echo "scale=3; $avg_speed / (3 * ${#IPV4_WEBSITES[@]})" | bc)
+                echo "DNS: $dns"
+                echo "  平均DNS64解析速度: $avg_speed 秒"
+                echo "  NAT64连接性成功率: $nat64_success / ${#IPV4_WEBSITES[@]}"
+                best_dns+=("$dns")
+                best_speed+=("$avg_speed")
+            done
+            ;;
+        2)
+            read -p "请输入测速文件地址 (留空使用默认地址): " TEST_URL
+            TEST_URL=${TEST_URL:-$DEFAULT_TEST_URL}
+            echo "正在测试DNS下载速度..."
+            for dns in "${dns64_servers[@]}"; do
+                if ! modify_dns "$dns"; then
+                    continue
+                fi
+                local avg_speed=0
+                for i in {1..3}; do
+                    local speed=$(test_download_speed "$TEST_URL" "$TEST_DURATION")
+                    avg_speed=$(echo "$avg_speed + $speed" | bc)
+                done
+                avg_speed=$(echo "scale=2; $avg_speed / 3" | bc)
+                echo "DNS: $dns, 平均下载速度: $avg_speed Mbps"
+                best_dns+=("$dns")
+                best_speed+=("$avg_speed")
+            done
+            ;;
+        *)
+            echo "无效的选择，返回主菜单"
+            return
+            ;;
+    esac
+    
+    # 排序并找出最快的两个DNS
+    for ((i=0; i<${#best_dns[@]}; i++)); do
+        for ((j=i+1; j<${#best_dns[@]}; j++)); do
+            if (( $(echo "${best_speed[$i]} > ${best_speed[$j]}" | bc -l) )); then
+                temp_dns=${best_dns[$i]}
+                temp_speed=${best_speed[$i]}
+                best_dns[$i]=${best_dns[$j]}
+                best_speed[$i]=${best_speed[$j]}
+                best_dns[$j]=$temp_dns
+                best_speed[$j]=$temp_speed
+            fi
+        done
     done
-
-    if [ -n "$fastest_dns" ]; then
-        echo "最快的DNS64服务器是 $fastest_dns，速度为 $highest_speed Mbps"
+    
+    echo "最快的两个DNS服务器是："
+    echo "1. ${best_dns[-1]} (${best_speed[-1]})"
+    echo "2. ${best_dns[-2]} (${best_speed[-2]})"
+    
+    read -p "是否要将DNS修改为这两个最快的服务器？(y/n，默认为n): " modify_choice
+    if [[ $modify_choice == "y" || $modify_choice == "Y" ]]; then
+        if modify_dns "${best_dns[-1]}" "${best_dns[-2]}"; then
+            echo "DNS已修改为最快的两个服务器"
+        fi
     else
-        echo "无法确定最快的DNS64服务器。"
+        restore_dns
+        echo "DNS已恢复为原始设置"
     fi
 }
 
-# 运行主函数
-main
+# 不修改DNS测速
+test_without_modifying_dns() {
+    echo "您选择了不修改DNS测速"
+    local dns64_servers=($(get_dns64_servers))
+    if [ ${#dns64_servers[@]} -eq 0 ]; then
+        echo "Error: No valid DNS64 servers found. Using default servers."
+        dns64_servers=("2001:4860:4860::6464" "2001:4860:4860::64")
+    fi
+    
+    echo "正在测试DNS64解析延迟和NAT64连接性..."
+    for dns in "${dns64_servers[@]}"; do
+        local avg_speed=0
+        local nat64_success=0
+        for website in "${IPV4_WEBSITES[@]}"; do
+            for i in {1..3}; do
+                local speed=$(test_dns_resolution_speed "$website" "$dns")
+                avg_speed=$(echo "$avg_speed + $speed" | bc)
+            done
+            if test_nat64_connectivity "$website" "$dns"; then
+                nat64_success=$((nat64_success + 1))
+            fi
+        done
+        avg_speed=$(echo "scale=3; $avg_speed / (3 * ${#IPV4_WEBSITES[@]})" | bc)
+        echo "DNS: $dns"
+        echo "  平均DNS64解析延迟: $avg_speed 秒"
+        echo "  NAT64连接性成功率: $nat64_success / ${#IPV4_WEBSITES[@]}"
+    done
+}
+
+# 运行主菜单
+main_menu
