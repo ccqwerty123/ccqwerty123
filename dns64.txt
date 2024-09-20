@@ -1,2 +1,22 @@
-2001:4860:4860::6464  #Google 
-2001:4860:4860::64  #Google 
+2a01:4f9:c010:3f02::1  #Kasper Dupont Finland
+2001:67c:2b0::4  #Trex Tampere
+2001:67c:2b0::6  #Trex Tampere
+2a09:11c0:f1:bbf0::70  #level66.network Germany
+2a01:4f8:c2c:123f::1  #Kasper Dupont Germany
+2001:67c:27e4:15::6411  #go6Labs Slovenia
+2001:67c:27e4::64  #go6Labs Slovenia
+2001:67c:27e4:15::64  #go6Labs Slovenia
+2001:67c:27e4::60  #go6Labs Slovenia
+2a00:1098:2b::1  #Kasper Dupont Netherlands
+2a03:7900:2:0:31:3:104:161  #Tuxis Netherlands
+2a00:1098:2c::1  #Kasper Dupont United Kingdom
+2a09:11c0:100::53  #level66.network
+2a01:4ff:f0:9876::1  #Kasper Dupont Ashburn
+2001:67c:2960::64  #level66 Germany
+2001:67c:2960::6464  #level66 Germany
+2606:4700:4700::6400  #Cloudflare Global anycast
+2606:4700:4700::64  #Cloudflare Global anycast
+2001:4860:4860::64  #Google Global anycast
+2001:4860:4860::6464  #Google Global anycast
+ 
+ 
