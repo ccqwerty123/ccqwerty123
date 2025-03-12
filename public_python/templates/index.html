@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JD Cookie 提交</title>
+    <style>
+       body { font-family: sans-serif; }
+        .container { width: 80%; margin: 0 auto; }
+        label { display: block; margin-bottom: 5px; }
+        input[type="text"], textarea, select, input[type="number"] { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        #result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; display: none; }
+        .error { color: red; }
+        .success { color: green; }
+        #mqtt-status { margin-top: 20px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>JD Cookie 提交</h1>
+        <form id="task-form" method="post" action="/jd">
+            <div>
+                <label for="jd_cookie">JD Cookie:</label>
+                <textarea id="jd_cookie" name="jd_cookie" rows="4" placeholder="请输入 JD Cookie"></textarea>
+            </div>
+            <div>
+                <label for="remark">备注 (可选):</label>
+                <input type="text" id="remark" name="remark" placeholder="可选">
+            </div>
+            <div>
+                <label for="option">选项:</label>
+                <select id="option" name="option">
+                    <option value="local">本地盒子</option>
+                </select>
+            </div>
+            <div>
+               <label for="duration">发送时长 (小时):</label>
+                <input type="number" id="duration" name="duration" min="0" max="72" value="10">
+            </div>
+            <div>
+                <button type="button" onclick="submitTask()">提交任务</button>
+            </div>
+        </form>
+        <div id="result"></div>
+
+        <h2>状态查询 (按 pt_key、pt_pin 或备注)</h2>
+        <div>
+            <label for="pt_key_query">pt_key (可选):</label>
+            <input type="text" id="pt_key_query" name="pt_key_query" placeholder="输入 pt_key 查询">
+        </div>
+        <div>
+            <label for="pt_pin_query">pt_pin (可选):</label>
+            <input type="text" id="pt_pin_query" name="pt_pin_query" placeholder="输入 pt_pin 查询">
+        </div>
+        <div>
+            <label for="remark_query">备注 (可选):</label>
+            <input type="text" id="remark_query" name="remark_query" placeholder="输入备注查询">
+        </div>
+        <div>
+            <button type="button" onclick="queryStatus()">查询</button>
+        </div>
+        <div id="status-result" style="display: none;"></div>
+        <h2>MQTT 状态</h2>
+        <div id="mqtt-status"></div>
+    </div>
+
+    <script>
+       function submitTask() {
+            const form = document.getElementById("task-form");
+            const resultDiv = document.getElementById("result");
+            const formData = new FormData(form);
+
+            fetch("/jd", {
+                method: "POST",
+                body: formData,
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(errData => {
+                        throw new Error(errData.error || "提交失败");
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                resultDiv.style.display = "block";
+                resultDiv.innerHTML = `<p class="success">${data.message} (Task ID: ${data.task_id})</p>`;
+                form.reset();
+            })
+            .catch(error => {
+                resultDiv.style.display = "block";
+                resultDiv.innerHTML = `<p class="error">${error.message}</p>`;
+            });
+        }
+
+        function queryStatus() {
+            const ptKey = document.getElementById("pt_key_query").value.trim();
+            const ptPin = document.getElementById("pt_pin_query").value.trim();
+            const remark = document.getElementById("remark_query").value.trim();
+            const statusResultDiv = document.getElementById("status-result");
+
+            let url = `/jd/status?`;
+            if (ptKey) {
+                url += `pt_key=${ptKey}`;
+            } else if (ptPin) {
+                url += `pt_pin=${ptPin}`;
+            } else if (remark) {
+                url += `remark=${remark}`;
+            } else {
+                statusResultDiv.style.display = "block";
+                statusResultDiv.innerHTML = `<p class="error">请提供 pt_key、pt_pin 或备注进行查询</p>`;
+                return;
+            }
+
+            // 添加 & 连接多个参数
+            if (ptKey && ptPin) {
+                url += `&pt_pin=${ptPin}`;
+            }
+            if ((ptKey || ptPin) && remark) {
+                url += `&remark=${remark}`;
+            }
+
+            fetch(url)
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(errData => {
+                            throw new Error(errData.error);
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    statusResultDiv.style.display = "block";
+                    if (Array.isArray(data)) {
+                        let html = "";
+                        data.forEach(task => {
+                            html += `<p>状态: ${task.status}, 备注: ${task.remark || '无'}, 时间戳: ${task.timestamp}</p>`;
+                        });
+                        statusResultDiv.innerHTML = html;
+                    } else {
+                        statusResultDiv.innerHTML = `<p>状态: ${data.status}, 备注: ${data.remark || '无'}, 时间戳: ${data.timestamp}</p>`;
+                    }
+                })
+                .catch(error => {
+                    statusResultDiv.style.display = "block";
+                    statusResultDiv.innerHTML = `<p class="error">${error.message}</p>`;
+                });
+        }
+        // 新增：获取并显示 MQTT 状态
+        function updateMqttStatus() {
+            const mqttStatusDiv = document.getElementById("mqtt-status");
+
+            fetch("/mqtt_status")
+                .then(response => response.json())
+                .then(data => {
+                    let statusText = `MQTT 状态: ${data.mqtt_status}<br>`;
+                    statusText += `Worker 状态: ${data.worker_status}<br>`;
+                    if (data.current_task_id) {
+                        statusText += `当前任务 ID: ${data.current_task_id}<br>`;
+                    }
+                    statusText += `待确认消息数: ${data.pending_messages_count}<br>`;
+                    if (data.next_retry_time) {
+                        statusText += `下次重试时间: ${data.next_retry_time}<br>`;
+                    }
+                    mqttStatusDiv.innerHTML = statusText;
+                })
+                .catch(error => {
+                    mqttStatusDiv.innerHTML = `<p class="error">获取 MQTT 状态失败: ${error}</p>`;
+                });
+        }
+
+        // 定期更新 MQTT 状态
+        setInterval(updateMqttStatus, 1000);  // 每秒更新一次
+        updateMqttStatus(); //首次加载
+    </script>
+</body>
+</html>
