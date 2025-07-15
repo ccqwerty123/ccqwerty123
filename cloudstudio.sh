@@ -1,27 +1,27 @@
 #!/bin/bash
 
 # =================================================================
-#  一键安装并运行Google Chrome的终极健壮脚本 (V13 - 授权认证与路径修复)
+#  一键安装并运行Google Chrome的终极健壮脚本 (V14 - 终极清理)
 # =================================================================
 #
-# 版本: 13.0
+# 版本: 14.0
 # 更新日期: 2025-07-15
 #
 # 特性:
+# - V14 核心改进:
+#   - 新增: 在启动前强制删除陈旧的 X server 锁文件和 socket 文件
+#     (/tmp/.X*-lock, /tmp/.X11-unix/X*)。这彻底解决了因上次
+#     运行崩溃而导致的 "server already running" 错误。
 # - V13 核心改进:
-#   - 新增: 使用 X authority "magic cookie" 文件在 Xvfb 和 x11vnc
-#     之间建立强认证连接，彻底解决 "socket hang up" 问题。
-#   - 新增: 自动验证 noVNC 网页文件的路径，修复显示目录列表的问题。
-#   - 新增: 将 x11vnc 的详细日志输出到 /tmp/x11vnc.log 以便调试。
+#   - 使用 X authority "magic cookie" 文件建立强认证连接。
+#   - 自动验证 noVNC 网页文件的路径。
 # - V12 核心改进:
 #   - 使用 -rfbport 强制 x11vnc 监听指定端口。
-# - V11 核心改进:
-#   - 完整的错误处理、智能的服务启动验证、动态端口配置。
 #
 # =================================================================
 
 # --- 脚本元数据和颜色代码 ---
-SCRIPT_VERSION="13.0"
+SCRIPT_VERSION="14.0"
 SCRIPT_DATE="2025-07-15"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -31,7 +31,7 @@ NC='\033[0m'
 
 # --- 核心配置 ---
 DISPLAY_NUM=1
-NOVNC_PATH="/usr/share/novnc" # noVNC 文件的标准路径
+NOVNC_PATH="/usr/share/novnc"
 
 # --- 辅助函数 ---
 handle_error() {
@@ -43,12 +43,6 @@ handle_error() {
         tail -n 10 /tmp/x11vnc.log
     fi
     echo -e "=====================================================${NC}\n"
-    # 在退出前执行最终清理
-    pkill -9 -f "x11vnc" >/dev/null 2>&1
-    pkill -9 -f "websockify" >/dev/null 2>&1
-    pkill -f "chrome" >/dev/null 2>&1
-    pkill -f "Xvfb" >/dev/null 2>&1
-    pkill -f "openbox" >/dev/null 2>&1
     exit 1
 }
 
@@ -57,19 +51,24 @@ echo -e "${CYAN}=====================================================${NC}"
 echo -e "${CYAN}  正在运行一键Chrome脚本 - 版本: ${SCRIPT_VERSION} (${SCRIPT_DATE}) ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
-# --- 步骤 0: 清理旧进程 ---
-echo -e "${GREEN}>>> 步骤 0/5: 正在清理可能存在的旧进程...${NC}"
+# --- 步骤 0: 终极清理 ---
+echo -e "${GREEN}>>> 步骤 0/5: 正在执行终极清理...${NC}"
+# 1. 杀死所有相关进程
 pkill -9 -f "x11vnc" >/dev/null 2>&1
 pkill -9 -f "websockify" >/dev/null 2>&1
-pkill -f "chrome" >/dev/null 2>&1
-pkill -f "Xvfb" >/dev/null 2>&1
-pkill -f "openbox" >/dev/null 2>&1
+pkill -9 -f "chrome" >/dev/null 2>&1
+pkill -9 -f "Xvfb" >/dev/null 2>&1
+pkill -9 -f "openbox" >/dev/null 2>&1
+echo "  - 旧进程已清理。"
+
+# 2. V14 关键改动: 强制删除残骸文件
 rm -f /tmp/.X${DISPLAY_NUM}-lock /tmp/.X11-unix/X${DISPLAY_NUM} /tmp/x11vnc.log
+echo "  - 残留的锁文件和日志已清理。"
 echo "清理完成。"
+
 
 # --- 步骤 1: 安装所有依赖 ---
 echo -e "${GREEN}>>> 步骤 1/5: 检查并安装核心依赖...${NC}"
-# x11-xserver-utils 包含 xauth
 if ! command -v x11vnc &> /dev/null || ! command -v websockify &> /dev/null || ! command -v xauth &> /dev/null; then
     echo "依赖未完全安装，正在进行安装..."
     sudo apt-get update || handle_error "apt-get update 失败。"
@@ -81,7 +80,6 @@ else
 fi
 
 # --- 步骤 2: 准备 Google Chrome ---
-# (此部分无改动)
 echo -e "${GREEN}>>> 步骤 2/5: 检查并准备Google Chrome...${NC}"
 if [ ! -f "./chrome-unpacked/opt/google/chrome/google-chrome" ]; then
     echo "本地Chrome不存在，正在下载并解压..."
@@ -101,7 +99,6 @@ fi
 echo -e "${GREEN}>>> 步骤 3/5: 配置环境变量...${NC}"
 VNC_PORT=$((5900 + DISPLAY_NUM))
 export DISPLAY=:${DISPLAY_NUM}
-# V13 新增: 定义认证文件的路径
 XAUTH_FILE=$(mktemp /tmp/xvfb.auth.XXXXXX)
 export XAUTHORITY=${XAUTH_FILE}
 echo "配置完成: 显示器 = ${DISPLAY}, VNC端口 = ${VNC_PORT}, 认证文件 = ${XAUTHORITY}"
@@ -111,10 +108,9 @@ echo -e "${GREEN}>>> 步骤 4/5: 正在后台启动虚拟桌面和所有服务..
 
 # 1. 启动虚拟屏幕，并创建认证文件
 echo "  - 正在启动 Xvfb 虚拟屏幕并生成认证..."
-# V13 关键改动: 使用 -auth 参数启动 Xvfb
 Xvfb ${DISPLAY} -screen 0 1280x800x24 -auth ${XAUTHORITY} &
 if ! timeout 5s bash -c "until [ -f '${XAUTHORITY}' ] && xdpyinfo -display ${DISPLAY} >/dev/null 2>&1; do sleep 0.1; done"; then
-    handle_error "Xvfb 虚拟屏幕启动或认证文件创建失败。"
+    handle_error "Xvfb 虚拟屏幕启动或认证文件创建失败。请检查系统日志。"
 fi
 echo "  - Xvfb 验证成功。"
 
@@ -130,7 +126,6 @@ sleep 5
 
 # 4. 启动VNC服务器，使用认证文件连接
 echo "  - 正在启动 x11vnc 服务器 (日志位于 /tmp/x11vnc.log)..."
-# V13 关键改动: 使用 -auth 和 -rfbport，并记录日志
 x11vnc -auth ${XAUTHORITY} -display ${DISPLAY} -rfbport ${VNC_PORT} -nopw -forever -bg -o /tmp/x11vnc.log
 
 # 验证VNC端口是否监听
@@ -142,9 +137,8 @@ echo "  - x11vnc 验证成功，正在监听端口 ${VNC_PORT}。"
 # --- 步骤 5: 启动noVNC网页服务 (带路径验证) ---
 echo -e "${GREEN}>>> 步骤 5/5: 正在启动noVNC网页服务...${NC}"
 
-# V13 关键改动: 验证 noVNC 路径是否有效
 if [ ! -f "${NOVNC_PATH}/vnc.html" ]; then
-    handle_error "noVNC 网页文件未在 '${NOVNC_PATH}/vnc.html' 找到！请检查 noVNC 安装路径。"
+    handle_error "noVNC 网页文件未在 '${NOVNC_PATH}/vnc.html' 找到！"
 fi
 echo "  - noVNC 路径验证成功。"
 
