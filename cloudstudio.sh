@@ -1,20 +1,21 @@
 #!/bin/bash
 
 # =================================================================
-#  一键安装并运行Google Chrome的终极健壮脚本 (V7 - 修复依赖检查)
+#  一键安装并运行Google Chrome的终极健壮脚本 (V8 - noVNC方案)
 # =================================================================
 #
-# 版本: 7.0
+# 版本: 8.0
 # 更新日期: 2025-07-15
 #
 # 特性:
-# - 修复了依赖检查的逻辑，确保ttyd被正确安装。
-# - 继承V6的所有优点。
+# - 使用最稳定可靠的 Xvfb + x11vnc + noVNC 方案。
+# - noVNC直接提供图形界面，不再是后台日志。
+# - 继承了版本检查、进程清理、按需安装等所有优点。
 #
 # =================================================================
 
 # --- 脚本元数据和颜色代码 ---
-SCRIPT_VERSION="7.0"
+SCRIPT_VERSION="8.0"
 SCRIPT_DATE="2025-07-15"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -27,24 +28,26 @@ echo -e "${CYAN}=====================================================${NC}"
 
 # --- 步骤 0: 清理旧进程 ---
 echo -e "${GREEN}>>> 步骤 0/4: 正在清理可能存在的旧进程...${NC}"
-sudo pkill -9 -f "ttyd" >/dev/null 2>&1
-sudo pkill -9 -f "chrome" >/dev/null 2>&1
-sudo pkill -9 -f "Xvfb" >/dev/null 2>&1
+sudo pkill -9 -f "x11vnc" >/dev/null 2>&1
+sudo pkill -9 -f "websockify" >/dev/null 2>&1
+sudo pkill -f "chrome" >/dev/null 2>&1
+sudo pkill -f "Xvfb" >/dev/null 2>&1
 echo "清理完成。"
 
-# --- 步骤 1: 安装所有依赖 (包括Xvfb) ---
+# --- 步骤 1: 安装所有依赖 ---
 echo -e "${GREEN}>>> 步骤 1/4: 检查并安装核心依赖...${NC}"
-# 关键修复：我们现在检查 ttyd 命令是否存在！
-if ! command -v ttyd &> /dev/null; then
-    echo "ttyd 未安装，正在进行完整的依赖安装..."
+# 检查 x11vnc 是否存在
+if ! command -v x11vnc &> /dev/null; then
+    echo "依赖未安装，正在进行安装 (xorg, openbox, xvfb, x11vnc, novnc)..."
     sudo apt update
-    sudo DEBIAN_FRONTEND=noninteractive apt install ttyd xorg openbox xvfb -y --no-install-recommends
+    # novnc 和 websockify (noVNC的桥接工具) 包含在novnc包里
+    sudo DEBIAN_FRONTEND=noninteractive apt install xorg openbox xvfb x11vnc novnc -y --no-install-recommends
     if [ $? -ne 0 ]; then
         echo -e "\033[0;31m错误：核心依赖安装失败。脚本中断。${NC}"
         exit 1
     fi
 else
-    echo -e "${YELLOW}依赖 'ttyd' 已安装，跳过安装步骤。${NC}"
+    echo -e "${YELLOW}依赖 'x11vnc' 已安装，跳过安装步骤。${NC}"
 fi
 
 # --- 步骤 2: 准备 Google Chrome ---
@@ -59,21 +62,33 @@ else
     echo -e "${YELLOW}本地Chrome已存在，跳过下载和解压。${NC}"
 fi
 
-# --- 步骤 3: 运行！(使用Xvfb-run 和 优化参数) ---
-echo -e "${GREEN}>>> 步骤 3/4: 使用Xvfb和优化参数启动Chrome...${NC}"
-echo "你的云环境现在应该会自动生成一个预览URL。"
-echo "请点击那个URL来访问浏览器！"
+# --- 步骤 3: 启动后台服务 ---
+echo -e "${GREEN}>>> 步骤 3/4: 正在后台启动虚拟桌面和Chrome...${NC}"
 
-CHROME_ARGS="--no-sandbox \
---disable-gpu \
---disable-dev-shm-usage \
---disable-software-rasterizer \
---disable-extensions \
---disable-sync \
---disable-background-networking \
---no-first-run \
---safebrowsing-disable-auto-update \
---password-store=basic \
---remote-debugging-port=9222"
+# 在后台启动一个1280x800的虚拟屏幕，编号为 :1
+export DISPLAY=:1
+Xvfb :1 -screen 0 1280x800x16 &
 
-ttyd xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" ./chrome-unpacked/opt/google/chrome/google-chrome $CHROME_ARGS
+# 等待Xvfb启动
+sleep 3
+
+# 在虚拟屏幕上启动窗口管理器和Chrome
+(
+  openbox &
+  ./chrome-unpacked/opt/google/chrome/google-chrome --no-sandbox --disable-gpu
+) &
+
+# 等待Chrome启动
+sleep 3
+
+# 在后台启动x11vnc，把虚拟屏幕:1的内容用VNC协议分享出来
+x11vnc -display :1 -nopw -forever &
+
+# --- 步骤 4: 启动noVNC网页服务 (这是前台进程) ---
+echo -e "${GREEN}>>> 步骤 4/4: 正在启动noVNC网页服务...${NC}"
+echo "你的云环境现在应该会自动为下面的端口生成一个预览URL。"
+echo "请点击那个URL来访问真正的浏览器图形界面！"
+
+# 启动websockify，它会把noVNC的网页和VNC服务桥接起来
+# 它会监听 6080 端口，并把请求转发给本地的VNC服务(5900)
+websockify --web=/usr/share/novnc/ 6080 localhost:5900
