@@ -1,20 +1,21 @@
 #!/bin/bash
 
 # =================================================================
-#  一键安装并运行Google Chrome的终极健壮脚本 (V9 - 修正VNC端口)
+#  一键安装并运行Google Chrome的终极健壮脚本 (V10 - 稳健启动流程)
 # =================================================================
 #
-# 版本: 9.0
+# 版本: 10.0
 # 更新日期: 2025-07-15
 #
 # 特性:
-# - 修正了websockify连接的VNC端口号 (5900 -> 5901)。
-# - 这是打通整个链路的最后一步。
+# - 采用更线性和稳健的服务启动顺序。
+# - 为x11vnc添加-bg参数，使其更可靠地在后台运行。
+# - 增加更长的延时，确保每个服务都有足够的时间初始化。
 #
 # =================================================================
 
 # --- 脚本元数据和颜色代码 ---
-SCRIPT_VERSION="9.0"
+SCRIPT_VERSION="10.0"
 SCRIPT_DATE="2025-07-15"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -55,22 +56,40 @@ else
     echo -e "${YELLOW}本地Chrome已存在，跳过。${NC}"
 fi
 
-# --- 步骤 3: 启动后台服务 ---
-echo -e "${GREEN}>>> 步骤 3/4: 正在后台启动虚拟桌面和Chrome...${NC}"
-export DISPLAY=:1
-Xvfb :1 -screen 0 1280x800x16 &
-sleep 3
-(
-  openbox &
-  ./chrome-unpacked/opt/google/chrome/google-chrome --no-sandbox --disable-gpu
-) &
-sleep 3
-x11vnc -display :1 -nopw -forever &
+# --- 步骤 3: 启动后台服务 (更稳健的方式) ---
+echo -e "${GREEN}>>> 步骤 3/4: 正在后台启动虚拟桌面和所有服务...${NC}"
 
-# --- 步骤 4: 启动noVNC网页服务 (这是前台进程) ---
+# 设置DISPLAY变量，供后续所有命令使用
+export DISPLAY=:1
+
+# 1. 启动虚拟屏幕，并等待它完成
+echo "  - 正在启动 Xvfb 虚拟屏幕..."
+Xvfb :1 -screen 0 1280x800x24 &
+XVFBPID=$! # 获取Xvfb的进程ID
+sleep 5 # 等待5秒，确保完全启动
+
+# 2. 启动窗口管理器
+echo "  - 正在启动 Openbox 窗口管理器..."
+openbox &
+sleep 2
+
+# 3. 启动Chrome浏览器
+echo "  - 正在启动 Google Chrome..."
+./chrome-unpacked/opt/google/chrome/google-chrome --no-sandbox --disable-gpu &
+sleep 5 # 等待Chrome主窗口出现
+
+# 4. 启动VNC服务器，连接到已经存在的屏幕上
+echo "  - 正在启动 x11vnc 服务器..."
+# -bg 参数让x11vnc更可靠地进入后台
+x11vnc -display :1 -nopw -forever -bg
+
+# 等待x11vnc初始化
+sleep 3
+
+# --- 步骤 4: 启动noVNC网页服务 (这是唯一的前台进程) ---
 echo -e "${GREEN}>>> 步骤 4/4: 正在启动noVNC网页服务...${NC}"
 echo "你的云环境现在应该会自动为下面的端口生成一个预览URL。"
 echo "请点击那个URL来访问真正的浏览器图形界面！"
 
-# 关键修复：将目标VNC端口从5900改为5901，以匹配我们创建的 :1 屏幕
-websockify --web=/usr/share/novnc/ 6080 localhost:5901
+# 我们监听 8080 端口，并连接到 5901 (VNC for display :1)
+websockify --web=/usr/share/novnc/ 8080 localhost:5901
