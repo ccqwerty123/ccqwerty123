@@ -1,4 +1,10 @@
 ### Hi there 👋
+
+
+wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/cloudstudio.sh | bash
+https://cloudstudio.net/a/28227223841255424 安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
+
+
 bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
 
 服务器优化
