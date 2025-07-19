@@ -150,17 +150,40 @@ main() {
 
     # 3. 安装 BitCrack
     echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
+    
+    # 首先检测计算能力（无论是否已安装）
+    local DETECTED_CAP
+    DETECTED_CAP=$(detect_compute_capability)
+    
+    # 检查是否需要重新编译
+    NEED_RECOMPILE=false
+    
     if [ ! -f "BitCrack/bin/cuBitCrack" ]; then
         echo -e "未找到 bitcrack 可执行文件，开始全新安装..."
-        [ -d "BitCrack" ] && rm -rf BitCrack
+        NEED_RECOMPILE=true
+    else
+        echo -e "检测到 BitCrack 已存在，正在验证计算能力匹配..."
         
-        # 强制重新检测计算能力，忽略环境变量
-        local DETECTED_CAP
-        DETECTED_CAP=$(detect_compute_capability)
+        # 进行快速运行测试来检查计算能力是否匹配
+        test_output=$(./BitCrack/bin/cuBitCrack -d 0 --keyspace 1:2 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH 2>&1 | head -n 10 || true)
+        
+        if echo "$test_output" | grep -q -E "(compute capability|CUDA error|no kernel image)"; then
+            echo -e "${RED}检测到计算能力不匹配，需要重新编译！${NC}"
+            echo "错误输出预览: $(echo "$test_output" | head -n 2)"
+            NEED_RECOMPILE=true
+        else
+            echo -e "${GREEN}现有的 BitCrack 编译版本运行正常。${NC}"
+        fi
+    fi
+    
+    # 根据检测结果决定是否重新编译
+    if [ "$NEED_RECOMPILE" = true ]; then
+        echo -e "${YELLOW}开始重新编译 BitCrack...${NC}"
+        [ -d "BitCrack" ] && rm -rf BitCrack
         
         git clone https://github.com/brichard19/BitCrack.git
         cd BitCrack
-        echo -e "${YELLOW}---> 使用强制检测到的 COMPUTE_CAP=${DETECTED_CAP} 开始 'make' 编译...${NC}"
+        echo -e "${YELLOW}---> 使用检测到的 COMPUTE_CAP=${DETECTED_CAP} 开始编译...${NC}"
         
         # 清理并重新编译，明确指定计算能力
         make clean || true
@@ -168,15 +191,12 @@ main() {
         # 强制覆盖任何预设的COMPUTE_CAP环境变量
         COMPUTE_CAP="${DETECTED_CAP}" make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1 COMPUTE_CAP="${DETECTED_CAP}"
         cd ..
-        echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
+        echo -e "${GREEN}---> BitCrack 重新编译完成！${NC}"
         
-        # 额外验证：检查编译时使用的计算能力
+        # 编译后验证
         if [ -f "BitCrack/bin/cuBitCrack" ]; then
-            echo -e "${CYAN}---> 编译验证：检查实际使用的计算能力${NC}"
-            echo "预期计算能力: ${DETECTED_CAP}"
+            echo -e "${CYAN}---> 编译验证：使用的计算能力 = ${DETECTED_CAP}${NC}"
         fi
-    else
-        echo -e "${GREEN}---> 检测到 bitcrack 已安装，跳过安装步骤。${NC}"
     fi
     
     # 验证 BitCrack
