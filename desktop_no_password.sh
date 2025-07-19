@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==     一键式 XFCE 桌面安装与无密码启动脚本 v4.0 (自包含/无密码版)      ==
+# ==   一键式 XFCE 桌面安装与无密码启动脚本 v4.1 (自包含/无密码/安全修复版)   ==
 # ===================================================================================
 # == 作者: Kilo Code (经 Gemini 整合与增强)                                       ==
 # == 功能: 在一个全新的 Debian/Ubuntu 系统上，一键安装并以无密码模式启动服务。    ==
@@ -36,7 +36,6 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # --- 安装完成标记文件 ---
-# 通过检查此文件是否存在，来判断是否需要执行安装流程
 INSTALL_FLAG_FILE="/etc/desktop_no_password.installed"
 
 # ===================================================================================
@@ -121,9 +120,7 @@ EOF
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 
-    # 创建标记文件，表示安装已成功完成
     touch "$INSTALL_FLAG_FILE"
-
     log_success "======================================================="
     log_success "==         🎉 环境安装成功！🎉         =="
     log_success "======================================================="
@@ -134,36 +131,28 @@ EOF
 # ==                         服务管理与启动 (每次运行)                           ==
 # ===================================================================================
 
-# 彻底停止可能存在的旧服务，确保环境干净
 stop_existing_services() {
     log_info "正在彻底清理旧的 VNC 和 noVNC 进程..."
-    
-    # 使用 vncserver -kill 命令
     sudo -u "$VNC_USER" vncserver -kill ":$DISPLAY_NUM" >/dev/null 2>&1
-    
-    # 强制杀死所有相关的进程，防止残留
     pkill -u "$VNC_USER" -f "Xtigervnc.*:$DISPLAY_NUM" >/dev/null 2>&1
     pkill -f "websockify.*$NOVNC_PORT" >/dev/null 2>&1
-    
-    # 清理残留的锁文件和套接字
     rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" >/dev/null 2>&1
-    
-    # 等待进程完全退出
     sleep 1
     log_info "服务清理完成。"
 }
 
-# 启动VNC服务（无密码模式）
 start_vnc_service() {
     log_info "正在以无密码模式启动 VNC 服务器..."
     # 关键参数: -SecurityTypes None 表示不需要任何安全验证
+    # 新增 --I-KNOW-THIS-IS-INSECURE 来绕过新版VNC的安全检查
     sudo -u "$VNC_USER" vncserver ":$DISPLAY_NUM" \
         -depth "$VNC_DEPTH" \
         -geometry "$VNC_GEOMETRY" \
         -localhost no \
-        -SecurityTypes None
+        -SecurityTypes None \
+        --I-KNOW-THIS-IS-INSECURE # <-- 新增的关键安全选项
     
-    sleep 2 # 等待服务启动
+    sleep 2
     if pgrep -u "$VNC_USER" -f "Xtigervnc.*:$DISPLAY_NUM" >/dev/null; then
         log_success "VNC 服务器（无密码模式）启动成功！"
     else
@@ -172,13 +161,11 @@ start_vnc_service() {
     fi
 }
 
-# 启动noVNC服务
 start_novnc_service() {
     log_info "正在启动 noVNC (网页客户端) 服务..."
-    # -D 选项让 websockify 在后台运行
     websockify -D --web=/usr/share/novnc/ "$NOVNC_PORT" "localhost:$VNC_PORT"
     
-    sleep 2 # 等待服务启动
+    sleep 2
     if pgrep -f "websockify.*$NOVNC_PORT" >/dev/null; then
         log_success "noVNC 服务启动成功！"
     else
@@ -187,11 +174,8 @@ start_novnc_service() {
     fi
 }
 
-# 显示最终的连接信息
 show_service_info() {
-    # 自动获取服务器的公网IP地址
     IP_ADDRESS=$(curl -s http://ipecho.net/plain || hostname -I | awk '{print $1}')
-
     echo
     log_info "================================================================"
     log_success "  🎉 所有服务已启动！现在可以通过浏览器访问远程桌面。 🎉"
@@ -213,22 +197,14 @@ show_service_info() {
 # ===================================================================================
 main() {
     check_root
-
-    # 检查是否需要执行安装流程
     if [ ! -f "$INSTALL_FLAG_FILE" ]; then
         install_environment
     else
         log_success "检测到环境已安装，将直接启动服务。"
     fi
-
-    # 每次都彻底停止旧服务，确保环境干净
     stop_existing_services
-
-    # 启动核心服务
     start_vnc_service
     start_novnc_service
-
-    # 显示最终连接信息
     show_service_info
 }
 
