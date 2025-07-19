@@ -4,6 +4,8 @@
 wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/cloudstudio.sh | bash
 https://cloudstudio.net/a/ 安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
 
+wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash
+全自动完成 KeyHunt 和 BitCrack 的安装与验证
 
 bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
 
