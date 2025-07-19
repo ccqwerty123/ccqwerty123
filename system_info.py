@@ -3,6 +3,7 @@ import subprocess
 import platform
 import os
 import math
+import re
 
 # --- 依赖检测 ---
 try:
@@ -13,121 +14,121 @@ except ImportError:
     print("  `python3 -m pip install psutil --break-system-packages` 或使用虚拟环境。")
     sys.exit(1)
 
-def get_cgroup_cpu_limit():
-    """
-    在 Linux 环境中检测 cgroup CPU 限制，计算出可用的核心数。
-    这是在容器化环境（如 Docker, Cloud Studio）中获取真实 CPU 配额的关键。
-    返回一个浮点数表示的核心数，如果未检测到限制则返回 None。
-    """
-    # 仅在 Linux 系统上执行
-    if not platform.system() == "Linux":
-        return None
+def parse_cpu_set(cpu_set_str):
+    """解析 CPU 集合字符串 (例如 '0-3,7') 并返回核心数。"""
+    count = 0
+    if not cpu_set_str:
+        return 0
+    # 移除所有空白字符
+    cpu_set_str = re.sub(r'\s+', '', cpu_set_str)
+    
+    parts = cpu_set_str.split(',')
+    for part in parts:
+        if '-' in part:
+            start, end = map(int, part.split('-'))
+            count += (end - start + 1)
+        else:
+            count += 1
+    return count
 
+def get_effective_cpu_count():
+    """
+    通过多种方法检测真实可用的CPU核心数，返回一个整数和检测方法。
+    """
+    # --- 方法 1: 检查 Cgroup v2 CPU 配额 ---
     try:
-        # cgroup v1 的路径
-        cfs_period_us_path = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
-        cfs_quota_us_path = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
-
-        # cgroup v2 的路径
         cpu_max_path = "/sys/fs/cgroup/cpu.max"
-
-        # 优先检查 cgroup v2
         if os.path.exists(cpu_max_path):
             with open(cpu_max_path, 'r') as f:
                 content = f.read().strip()
-            
             parts = content.split()
             if len(parts) == 2 and parts[0] != 'max':
                 quota, period = map(int, parts)
-                return quota / period
-
-        # 如果 v2 不存在或无限制，检查 cgroup v1
-        elif os.path.exists(cfs_period_us_path) and os.path.exists(cfs_quota_us_path):
-            with open(cfs_period_us_path, 'r') as f:
-                period = int(f.read().strip())
-            with open(cfs_quota_us_path, 'r') as f:
-                quota = int(f.read().strip())
-
-            # quota 为 -1 表示没有限制
-            if quota > 0 and period > 0:
-                return quota / period
-                
+                if quota > 0 and period > 0:
+                    return max(1, math.floor(quota / period)), "Cgroup v2 Quota"
     except Exception:
-        # 如果发生任何错误（如权限问题），则假定无限制
-        return None
-    
-    # 如果所有检查都未发现限制
-    return None
+        pass # 忽略错误，继续下一种方法
 
+    # --- 方法 2: 检查 Cgroup v1 CPU 配额 ---
+    try:
+        cfs_period_path = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+        cfs_quota_path = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+        if os.path.exists(cfs_quota_path) and os.path.exists(cfs_period_path):
+            with open(cfs_period_path, 'r') as f:
+                period = int(f.read().strip())
+            with open(cfs_quota_path, 'r') as f:
+                quota = int(f.read().strip())
+            if quota > 0 and period > 0:
+                return max(1, math.floor(quota / period)), "Cgroup v1 Quota"
+    except Exception:
+        pass
 
-def get_usable_cores():
-    """
-    获取推荐用于并行处理的工作进程数。
-    优先使用 cgroup 限制，如果无限制则回退到系统的逻辑核心数。
-    """
-    # 尝试从 cgroup 获取精确的 CPU 配额
-    core_limit = get_cgroup_cpu_limit()
-    
-    if core_limit is not None:
-        # 如果有配额，即使是小数（如0.5），也至少保证1个工作进程。
-        # 使用 math.floor 可以确保不超过配额，但至少为1。
-        return max(1, math.floor(core_limit))
-    else:
-        # 如果没有 cgroup 限制，则使用系统的全部逻辑核心
-        # os.cpu_count() 是获取逻辑核心数的推荐方法
-        return os.cpu_count() or 1
-
-
-def get_size(bytes_val, suffix="B"):
-    """将字节数转换为易读的格式。"""
-    factor = 1024
-    for unit in ["", "K", "M", "G", "T", "P"]:
-        if bytes_val < factor:
-            return f"{bytes_val:.2f}{unit}{suffix}"
-        bytes_val /= factor
+    # --- 方法 3: 检查 Cgroup cpuset (核心绑定) ---
+    try:
+        # 适用于 cgroup v1 和 v2 的混合路径检查
+        cpuset_paths = [
+            "/sys/fs/cgroup/cpuset.cpus.effective", # cgroup v2
+            "/sys/fs/cgroup/cpuset/cpuset.cpus"     # cgroup v1
+        ]
+        for path in cpuset_paths:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    cpu_set_str = f.read().strip()
+                if cpu_set_str:
+                    core_count = parse_cpu_set(cpu_set_str)
+                    return core_count, f"Cgroup cpuset ({path})"
+    except Exception:
+        pass
+        
+    # --- 方法 4: 使用 'taskset' 命令作为最后的可靠手段 ---
+    try:
+        # 获取当前进程的 PID
+        pid = os.getpid()
+        # 运行 taskset 命令
+        result = subprocess.run(
+            ['taskset', '-c', '-p', str(pid)],
+            capture_output=True, text=True, check=True
+        )
+        # 输出通常是 "pid <PID>'s current affinity list: <LIST>"
+        affinity_list_str = result.stdout.split(':')[-1].strip()
+        core_count = parse_cpu_set(affinity_list_str)
+        return core_count, "taskset Command"
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # FileNotFoundError: taskset 命令不存在
+        # CalledProcessError: 命令执行失败
+        pass
+        
+    # --- 最终回退 ---
+    return os.cpu_count(), "Fallback (可能不准确)"
 
 def get_system_info():
-    """收集并打印详细的系统信息，包括真实的可用资源。"""
+    """收集并打印系统信息。"""
+    
     print("="*40, "物理主机信息", "="*40)
-    
-    # --- 操作系统信息 ---
     uname = platform.uname()
-    print(f"操作系统: {uname.system}")
-    print(f"版本: {uname.release}")
+    print(f"操作系统: {uname.system} {uname.release}")
     print(f"处理器架构: {uname.machine}")
-
-    # --- 物理 CPU 信息 ---
-    print("\n" + "="*40, "物理 CPU 信息 (主机)", "="*40)
-    print(f"物理核心数: {psutil.cpu_count(logical=False)}")
-    print(f"逻辑核心数 (总线程数): {psutil.cpu_count(logical=True)}")
-
-    # --- 物理内存信息 ---
-    print("\n" + "="*40, "物理内存 (RAM) 信息 (主机)", "="*40)
+    print(f"物理/逻辑核心数: {psutil.cpu_count(logical=False)} / {psutil.cpu_count(logical=True)}")
     svmem = psutil.virtual_memory()
-    print(f"总大小: {get_size(svmem.total)}")
-    print(f"可用空间: {get_size(svmem.available)}")
-    print(f"使用率: {svmem.percent}%")
+    print(f"总内存: {svmem.total / (1024**3):.2f} GB")
 
-    # --- 关键部分：可用资源 ---
-    print("\n" + "="*35, "您的环境可用/受限资源", "="*35)
+    print("\n" + "="*35, "您的环境可用资源分析", "="*35)
     
-    # 获取精确的 cgroup 配额 (可能是小数)
-    core_limit_float = get_cgroup_cpu_limit()
-    # 获取推荐的、用于创建进程池的整数核心数
-    usable_cores = get_usable_cores()
+    usable_cores, method = get_effective_cpu_count()
 
-    if core_limit_float is not None:
-        print(f"检测到 Cgroup CPU 限制，精确配额: {core_limit_float:.2f} 核")
-        print(f"✅ 推荐的可用核心数 (用于并行计算): {usable_cores}")
+    print(f"检测方法: {method}")
+
+    if method == "Fallback (可能不准确)":
+        print(f"⚠️  警告: 未能通过任何方法检测到CPU限制。")
+        print(f"   以下数字代表物理主机，很可能不代表您的真实配额！")
     else:
-        print("未检测到 Cgroup CPU 限制。")
-        print(f"✅ 可用核心数 (与主机逻辑核心数相同): {usable_cores}")
+        print("✅ 成功检测到环境的CPU限制。")
 
+    print(f"推荐的可用核心数 (用于并行计算): {usable_cores}")
+    
     print("\n" + "="*90)
-    print(f"💡 提示: 当您需要并行处理任务时（例如使用 `multiprocessing.Pool`），")
-    print(f"   建议您使用 **{usable_cores}** 作为工作进程数，而不是 {psutil.cpu_count(logical=True)}。")
+    print(f"💡 结论: 在需要并行处理时，建议您使用 **{usable_cores}** 个工作进程。")
     print("="*90)
-
 
 if __name__ == "__main__":
     get_system_info()
