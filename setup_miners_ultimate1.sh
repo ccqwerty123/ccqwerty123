@@ -1,18 +1,18 @@
-#!/bin.bash
+#!/bin/bash
 #
 # KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
-# 版本: 1.3.2 - 修复COMPUTE_CAP检测和清理版
+# 版本: 1.4.0 - 智能 COMPUTE_CAP 检查版
 #
 # 特性:
 # 1. 版本控制: 启动时显示版本号。
 # 2. 幂等性: 重复运行会跳过已完成的安装。
 # 3. 智能验证: 通过捕获帮助命令的输出来判断是否成功，并显示输出。
-# 4. 最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
-# 5. 智能COMPUTE_CAP检测: 检查已安装的BitCrack是否使用了正确的COMPUTE_CAP值。
+# 4. COMPUTE_CAP 检查: 自动检查并更新 BitCrack Makefile 中的 COMPUTE_CAP 值。
+# 5. 最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
 #
 
 # --- 脚本版本 ---
-SCRIPT_VERSION="1.3.2 - 修复COMPUTE_CAP检测和清理版"
+SCRIPT_VERSION="1.4.0 - 智能 COMPUTE_CAP 检查版"
 
 # --- Bash 颜色代码 ---
 GREEN='\033[0;32m'
@@ -44,71 +44,60 @@ detect_compute_capability() {
     echo "$COMPUTE_CAP"
 }
 
-# --- 函数：检查Makefile中的COMPUTE_CAP值 ---
-check_makefile_compute_cap() {
-    local makefile_path="$1"
-    local current_cap="$2"
+# --- 函数：检查并更新 BitCrack Makefile 中的 COMPUTE_CAP ---
+check_and_update_compute_cap() {
+    local current_cap="$1"
+    local bitcrack_dir="BitCrack"
+    local makefile_path="${bitcrack_dir}/Makefile"
+    
+    echo -e "${YELLOW}---> 正在检查 BitCrack Makefile 中的 COMPUTE_CAP 设置...${NC}"
     
     if [ ! -f "$makefile_path" ]; then
-        echo "false"
-        return
+        echo -e "${YELLOW}---> Makefile 不存在，需要重新克隆项目。${NC}"
+        return 1  # 需要重新安装
     fi
     
-    # 从Makefile中提取COMPUTE_CAP值 - 改进的正则表达式
-    local makefile_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' "$makefile_path" 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//')
+    # 从 Makefile 中提取 COMPUTE_CAP 值
+    local makefile_cap
+    makefile_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' "$makefile_path" 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//' || true)
     
-    if [ -z "$makefile_cap" ]; then
-        echo "false"
-        return
-    fi
-    
-    echo -e "${CYAN}---> Makefile中的COMPUTE_CAP: ${makefile_cap}${NC}"
-    echo -e "${CYAN}---> 当前GPU的COMPUTE_CAP: ${current_cap}${NC}"
+    echo -e "Makefile 中的 COMPUTE_CAP=${makefile_cap:-<none>}"
+    echo -e "当前 GPU 的 COMPUTE_CAP=${current_cap}"
     
     if [ "$makefile_cap" = "$current_cap" ]; then
-        echo "true"
+        echo -e "${GREEN}---> COMPUTE_CAP 值正确，无需更新。${NC}"
+        return 0  # 不需要重新编译
     else
-        echo "false"
+        echo -e "${YELLOW}---> COMPUTE_CAP 值不匹配，需要更新并重新编译。${NC}"
+        
+        # 更新 Makefile 中的 COMPUTE_CAP
+        echo -e "${YELLOW}---> 正在更新 Makefile 中的 COMPUTE_CAP 为 ${current_cap}...${NC}"
+        cd "$bitcrack_dir"
+        sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${current_cap}/" Makefile
+        
+        # 验证更新是否成功
+        local updated_cap
+        updated_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' Makefile 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//' || true)
+        
+        if [ "$updated_cap" = "$current_cap" ]; then
+            echo -e "${GREEN}---> Makefile 更新成功！${NC}"
+        else
+            echo -e "${RED}---> Makefile 更新失败！${NC}"
+            cd ..
+            return 1
+        fi
+        
+        # 清理并重新编译
+        echo -e "${YELLOW}---> 正在清理之前的编译文件...${NC}"
+        make clean || true
+        
+        echo -e "${YELLOW}---> 正在重新编译 BitCrack...${NC}"
+        make -j$(nproc) BUILD_CUDA=1
+        
+        cd ..
+        echo -e "${GREEN}---> BitCrack 重新编译完成！${NC}"
+        return 0
     fi
-}
-
-# --- 函数：安装BitCrack ---
-install_bitcrack() {
-    local detected_cap="$1"
-    local reason="$2"
-    
-    echo -e "${YELLOW}---> ${reason}，开始安装BitCrack...${NC}"
-    
-    # 如果目录存在，先完全清理
-    if [ -d "BitCrack" ]; then
-        echo -e "${YELLOW}---> 清理旧的 BitCrack 安装...${NC}"
-        rm -rf BitCrack
-    fi
-    
-    git clone https://github.com/brichard19/BitCrack.git
-    cd BitCrack
-    
-    # 修改 Makefile 中的 COMPUTE_CAP 值
-    echo -e "${YELLOW}---> 设置 COMPUTE_CAP=${detected_cap} 到 Makefile...${NC}"
-    sed -i "s/^[[:space:]]*COMPUTE_CAP[[:space:]]*=.*/COMPUTE_CAP=${detected_cap}/" Makefile
-    
-    # 验证修改是否成功
-    local updated_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' Makefile | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//')
-    echo -e "${CYAN}---> Makefile 已更新，COMPUTE_CAP=${updated_cap}${NC}"
-    
-    # 彻底清理并编译
-    echo -e "${YELLOW}---> 开始编译 BitCrack...${NC}"
-    make clean || true
-    
-    # 清理可能残留的目标文件
-    find . -name "*.o" -type f -delete 2>/dev/null || true
-    find . -name "*.a" -type f -delete 2>/dev/null || true
-    
-    # 使用修改后的 Makefile 进行编译
-    make -j$(nproc) BUILD_CUDA=1
-    
-    cd ..
-    echo -e "${GREEN}---> BitCrack 安装完成！${NC}"
 }
 
 # --- 主脚本逻辑 ---
@@ -151,42 +140,45 @@ main() {
         echo -e "${RED}---> KeyHunt 验证失败：无法执行或没有帮助信息输出。${NC}"
     fi
 
-    # 3. 安装 BitCrack
+    # 3. 安装/检查 BitCrack
     echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
     
-    # 检测当前GPU的计算能力
+    # 检测当前 GPU 的计算能力
     local DETECTED_CAP
     DETECTED_CAP=$(detect_compute_capability)
     
-    # 检查是否需要安装或重新安装BitCrack
-    local need_install=false
-    local install_reason=""
+    local need_reinstall=false
     
+    # 检查是否需要全新安装
     if [ ! -f "BitCrack/bin/cuBitCrack" ]; then
-        need_install=true
-        install_reason="未找到 BitCrack 可执行文件"
+        echo -e "未找到 bitcrack 可执行文件，开始全新安装..."
+        need_reinstall=true
     else
-        echo -e "${GREEN}---> 检测到 BitCrack 已安装，正在检查COMPUTE_CAP配置...${NC}"
-        
-        # 检查Makefile中的COMPUTE_CAP值是否匹配
-        local cap_match=$(check_makefile_compute_cap "BitCrack/Makefile" "$DETECTED_CAP")
-        
-        if [ "$cap_match" = "false" ]; then
-            need_install=true
-            install_reason="Makefile中的COMPUTE_CAP值与当前GPU不匹配，需要重新编译"
-        else
-            echo -e "${GREEN}---> COMPUTE_CAP配置正确，跳过安装步骤。${NC}"
+        echo -e "${GREEN}---> 检测到 BitCrack 已安装，检查 COMPUTE_CAP 设置...${NC}"
+        # 检查 COMPUTE_CAP 是否匹配
+        if ! check_and_update_compute_cap "$DETECTED_CAP"; then
+            echo -e "${YELLOW}---> 需要重新安装 BitCrack。${NC}"
+            need_reinstall=true
         fi
     fi
     
-    # 根据检查结果决定是否安装
-    if [ "$need_install" = true ]; then
-        install_bitcrack "$DETECTED_CAP" "$install_reason"
+    # 如果需要全新安装
+    if [ "$need_reinstall" = true ]; then
+        [ -d "BitCrack" ] && rm -rf BitCrack
+        git clone https://github.com/brichard19/BitCrack.git
+        cd BitCrack
+        echo -e "${YELLOW}---> 正在设置 COMPUTE_CAP=${DETECTED_CAP} 并开始编译...${NC}"
+        sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${DETECTED_CAP}/" Makefile
+        make clean || true
+        make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1
+        cd ..
+        echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
     fi
     
     # 验证 BitCrack
     echo -e "${YELLOW}---> 正在验证 BitCrack...${NC}"
     if [ -f "BitCrack/bin/cuBitCrack" ]; then
+        # 使用正确的路径并捕获输出
         validation_output=$(./BitCrack/bin/cuBitCrack --help 2>/dev/null || true)
         if [ -n "$validation_output" ]; then
             echo -e "${CYAN}--- BitCrack 帮助信息 ---${NC}"
