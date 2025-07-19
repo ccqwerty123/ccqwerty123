@@ -1,168 +1,125 @@
 import subprocess
-import os
-import threading
-import sys
-import atexit
-import re
+import psutil
+import shlex
 
-# --- 1. 基础配置 ---
-
-KEYHUNT_PATH = '/workspace/keyhunt/keyhunt'
-BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack'
-OUTPUT_DIR = '/home/desktop/'
-BTC_ADDRESS = '1DBaumZxUkM4qMQRt2LVWyFJq5kDtSZQot'
-START_KEY = '0000000000000000000000000000000000000000000000000000000000000800'
-END_KEY = '0000000000000000000000000000000000000000000000000000000000000fff'
-
-# --- 2. 全局状态与精确的正则表达式 ---
-
-FOUND_PRIVATE_KEY = None
-key_found_event = threading.Event()
-processes = []
-
-# 为每个工具定义精确的正则表达式
-# KeyHunt 格式: Private key (hex): FFFFF...
-KEYHUNT_PRIV_KEY_RE = re.compile(r'Private key \(hex\):\s*([0-9a-fA-F]{64})')
-# cuBitCrack 格式: ... Priv:FFFFF...
-CUBITCRACK_PRIV_KEY_RE = re.compile(r'Priv:([0-9a-fA-F]{64})')
-
-# --- 3. 硬件检测与参数配置 (更稳健) ---
-
-def get_cpu_threads():
-    """自动检测CPU核心数并返回合理的线程数。"""
+def get_gpu_info():
+    """
+    通过直接执行 nvidia-smi 命令来获取 GPU 信息 (推荐方式)。
+    我们请求CSV格式的输出以便于解析。
+    """
+    print("--- 正在获取 GPU 信息 (推荐方式) ---")
     try:
-        cpu_cores = os.cpu_count()
-        threads = max(1, cpu_cores - 1 if cpu_cores > 1 else 1)
-        print(f"INFO: 检测到 {cpu_cores} 个CPU核心。将为 KeyHunt 分配 {threads} 个线程。")
-        return threads
-    except Exception as e:
-        print(f"WARN: 无法自动检测CPU核心数，使用默认值 15。错误: {e}")
-        return 15
+        # 定义要查询的GPU属性
+        query_args = [
+            'index',
+            'name',
+            'temperature.gpu',
+            'utilization.gpu',
+            'memory.total',
+            'memory.used',
+            'memory.free'
+        ]
+        # 构建 nvidia-smi 命令
+        command = [
+            'nvidia-smi',
+            f'--query-gpu={",".join(query_args)}',
+            '--format=csv,noheader,nounits'
+        ]
+        
+        # 执行命令并捕获输出
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        gpu_info_list = result.stdout.strip().split('\n')
+        
+        print("成功获取到 GPU 信息:")
+        for i, gpu_info_str in enumerate(gpu_info_list):
+            gpu_data = gpu_info_str.split(', ')
+            print(f"\nGPU {gpu_data[0]}:")
+            print(f"  产品名称: {gpu_data[1]}")
+            print(f"  温度: {gpu_data[2]}°C")
+            print(f"  GPU 使用率: {gpu_data[3]} %")
+            print(f"  总显存: {gpu_data[4]} MiB")
+            print(f"  已用显存: {gpu_data[5]} MiB")
+            print(f"  剩余显存: {gpu_data[6]} MiB")
 
-def get_gpu_params():
-    """通过nvidia-smi检测GPU，并传递完整环境变量以提高成功率。"""
-    default_params = {'blocks': 288, 'threads': 256, 'points': 1024}
-    NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
+    except FileNotFoundError:
+        print("错误: 'nvidia-smi' 命令未找到。请确保 NVIDIA 驱动已正确安装并且 'nvidia-smi' 在您的 PATH 中。")
+    except subprocess.CalledProcessError as e:
+        print(f"执行 nvidia-smi 时出错: {e}")
+        print(f"错误输出:\n{e.stderr}")
+    except Exception as e:
+        print(f"发生未知错误: {e}")
+
+def execute_wget_pipe_simulation():
+    """
+    模拟执行 'wget -qO- | command' 这种管道操作。
+    这是一个处理您特殊需求的示例。在实际情况中，您需要将URL替换为真实的地址。
+    """
+    print("\n--- 模拟执行 'wget -qO- | grep' 管道命令 ---")
     try:
-        if not os.path.exists(NVIDIA_SMI_PATH):
-             raise FileNotFoundError(f"'{NVIDIA_SMI_PATH}' not found.")
-        command = [NVIDIA_SMI_PATH, '--query-gpu=multiprocessor_count', '--format=csv,noheader']
-        # 传递当前环境变量给子进程，这可能解决驱动通信问题
-        result = subprocess.run(
-            command, capture_output=True, text=True, check=True, env=os.environ
-        )
-        sm_count = int(result.stdout.strip())
+        # 这是一个示例命令。在真实场景中，URL应该是提供nvidia-smi输出的地址
+        # 我们在这里用 'echo' 来模拟 wget 的输出
+        cmd1 = "echo 'GPU 0: NVIDIA GeForce RTX 3080'"
+        cmd2 = "grep 'RTX'"
+
+        # 使用 shell=True 来执行管道命令
+        # 安全警告: 当使用 shell=True 时，请确保命令内容是可信的，以避免安全风险。
+        pipe_command = f"{cmd1} | {cmd2}"
+        print(f"执行管道命令: {pipe_command}")
         
-        blocks, threads, points = sm_count * 7, 256, 1024
-        print(f"INFO: 成功检测到 GPU 有 {sm_count} SMs。自动配置参数: -b {blocks} -t {threads} -p {points}")
-        return {'blocks': blocks, 'threads': threads, 'points': points}
+        result = subprocess.run(pipe_command, shell=True, capture_output=True, text=True, check=True)
         
+        print("管道命令输出:")
+        print(result.stdout.strip())
+        
+    except subprocess.CalledProcessError as e:
+        print(f"执行管道命令时出错: {e}")
+        print(f"错误输出:\n{e.stderr}")
     except Exception as e:
-        print(f"WARN: 自动检测GPU失败。这在某些容器环境中是正常的。错误: {e}")
-        print("WARN: 将为 cuBitCrack 使用默认的高性能参数。")
-        return default_params
+        print(f"发生未知错误: {e}")
 
-# --- 4. 进程管理与核心执行逻辑 ---
 
-def cleanup_processes():
-    """程序退出时，只终止所有子进程，不删除文件。"""
-    for p in processes:
-        if p.poll() is None:
-            try: p.terminate()
-            except: pass
-
-atexit.register(cleanup_processes)
-
-def run_and_monitor(command, tool_name, regex_pattern):
-    """运行命令，使用指定的正则表达式监控输出，并解析私钥。"""
-    global processes, FOUND_PRIVATE_KEY
-    print(f"🚀 正在启动 {tool_name}...\n   执行: {' '.join(command)}")
+def find_specific_processes():
+    """
+    在Linux环境中寻找指定的进程。
+    """
+    print("\n--- 正在寻找指定进程 ---")
     
-    try:
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-        )
-        processes.append(process)
+    processes_to_find = {
+        "KeyHunt": "/workspace/keyhunt/keyhunt",
+        "BitCrack": "/workspace/BitCrack/bin/cuBitCrack"
+    }
+    
+    found_processes = {name: [] for name in processes_to_find}
+    
+    # 遍历所有正在运行的进程
+    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+        try:
+            for name, path in processes_to_find.items():
+                # 检查进程的可执行文件路径是否匹配
+                if proc.info['exe'] and proc.info['exe'] == path:
+                    found_processes[name].append({
+                        'pid': proc.info['pid'],
+                        'name': proc.info['name'],
+                        'cmdline': ' '.join(proc.info['cmdline']) if proc.info['cmdline'] else ''
+                    })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass # 某些进程可能在迭代时已经结束或无法访问
 
-        for line in iter(process.stdout.readline, ''):
-            if key_found_event.is_set(): break
-            
-            sys.stdout.write(f"[{tool_name}] {line.strip()}\n")
-            sys.stdout.flush()
-
-            match = regex_pattern.search(line)
-            if match:
-                FOUND_PRIVATE_KEY = match.group(1).lower() # 统一转为小写
-                print("\n" + "="*80)
-                print(f"🎉🎉🎉 胜利！ {tool_name} 找到了密钥！正在停止所有搜索... 🎉🎉🎉")
-                print("="*80 + "\n")
-                key_found_event.set()
-                break
-        
-        if process.poll() is None: process.terminate()
-        process.wait()
-        print(f"[{tool_name}] 进程已停止。")
-
-    except Exception as e:
-        print(f"[{tool_name}] 发生严重错误: {e}")
-        key_found_event.set()
-
-def main():
-    """主函数，负责设置和启动所有任务。"""
-    try:
-        print("="*80)
-        print("INFO: 永久文件将被保存在: " + OUTPUT_DIR)
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
-        # 确保所有文件路径都正确
-        kh_address_file = os.path.join(OUTPUT_DIR, 'target_address.txt')
-        bc_found_file = os.path.join(OUTPUT_DIR, 'found.txt')
-        bc_progress_file = os.path.join(OUTPUT_DIR, 'progress.dat')
-
-        print("INFO: 正在根据系统硬件自动配置性能参数...")
-        keyhunt_threads = get_cpu_threads()
-        cubitcrack_params = get_gpu_params()
-        print("="*80)
-
-        with open(kh_address_file, 'w') as f: f.write(BTC_ADDRESS)
-        
-        keyhunt_command = [
-            KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
-            '-l', 'both', '-t', str(keyhunt_threads),
-            '-r', f'{START_KEY}:{END_KEY}'
-        ]
-
-        bitcrack_command = [
-            BITCRACK_PATH,
-            '-b', str(cubitcrack_params['blocks']),
-            '-t', str(cubitcrack_params['threads']),
-            '-p', str(cubitcrack_params['points']),
-            '--keyspace', f'{START_KEY}:{END_KEY}',
-            '-o', bc_found_file, '--continue', bc_progress_file,
-            BTC_ADDRESS
-        ]
-
-        # 为每个工具启动一个线程，并传入其专属的正则表达式
-        thread_keyhunt = threading.Thread(target=run_and_monitor, args=(keyhunt_command, "KeyHunt", KEYHUNT_PRIV_KEY_RE))
-        thread_bitcrack = threading.Thread(target=run_and_monitor, args=(bitcrack_command, "BitCrack", CUBITCRACK_PRIV_KEY_RE))
-
-        thread_keyhunt.start()
-        thread_bitcrack.start()
-        thread_keyhunt.join()
-        thread_bitcrack.join()
-        
-        print("\n" + "="*80)
-        if FOUND_PRIVATE_KEY:
-            print("🎉🎉🎉 最终结果：私钥已找到并提取！ 🎉🎉🎉")
-            print(f"\n  私钥 (HEX): {FOUND_PRIVATE_KEY}\n")
-            print("您可以复制上面的私钥用于后续操作。")
+    # 打印结果
+    for name, procs in found_processes.items():
+        if procs:
+            print(f"\n找到正在运行的 '{name}' 进程:")
+            for p_info in procs:
+                print(f"  - PID: {p_info['pid']}, 名称: {p_info['name']}, 命令行: {p_info['cmdline']}")
         else:
-            print("所有搜索任务已在指定范围内完成，未找到密钥。")
-        print(f"所有相关文件 (如 found.txt, progress.dat) 都保留在 '{OUTPUT_DIR}' 目录中。")
-        print("="*80)
+            print(f"\n未找到正在运行的 '{name}' 进程 (路径: {processes_to_find[name]})")
 
-    except Exception as e:
-        print(f"脚本主程序发生致命错误: {e}")
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    # 1. 获取并显示 GPU 信息
+    get_gpu_info()
+    
+    # 2. 演示如何执行管道命令
+    execute_wget_pipe_simulation()
+    
+    # 3. 寻找指定的进程
+    find_specific_processes()
