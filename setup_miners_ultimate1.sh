@@ -1,18 +1,18 @@
-#!/bin/bash
+#!/bin.bash
 #
 # KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
-# 版本: 1.3.1 - 修复管道执行环境问题
+# 版本: 1.3.1 - 智能COMPUTE_CAP检测版
 #
 # 特性:
 # 1. 版本控制: 启动时显示版本号。
 # 2. 幂等性: 重复运行会跳过已完成的安装。
 # 3. 智能验证: 通过捕获帮助命令的输出来判断是否成功，并显示输出。
 # 4. 最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
-# 5. 修复管道执行环境问题: 强制重新检测GPU计算能力，忽略环境变量
+# 5. 智能COMPUTE_CAP检测: 检查已安装的BitCrack是否使用了正确的COMPUTE_CAP值。
 #
 
 # --- 脚本版本 ---
-SCRIPT_VERSION="1.3.1 - 修复管道执行环境问题"
+SCRIPT_VERSION="1.3.1 - 智能COMPUTE_CAP检测版"
 
 # --- Bash 颜色代码 ---
 GREEN='\033[0;32m'
@@ -28,78 +28,65 @@ set -e
 KEYHUNT_SUCCESS=false
 BITCRACK_SUCCESS=false
 
-# --- 函数：强制重新检测 NVIDIA GPU 的计算能力 ---
+# --- 函数：检测 NVIDIA GPU 的计算能力 ---
 detect_compute_capability() {
-    echo -e "${YELLOW}---> 正在强制重新检测 NVIDIA GPU 计算能力...${NC}"
-    
-    # 清除可能影响检测的环境变量
-    unset COMPUTE_CAP
-    unset CUDA_COMPUTE_CAP
-    unset NVIDIA_COMPUTE_CAP
-    
+    echo -e "${YELLOW}---> 正在检测 NVIDIA GPU 计算能力...${NC}"
     if ! command -v nvidia-smi &> /dev/null; then
         echo -e "${RED}错误: 未找到 'nvidia-smi' 命令。${NC}"
         exit 1
     fi
-    
-    echo -e "${CYAN}---> 调试信息: 执行环境检查${NC}"
-    echo "当前用户: $(whoami)"
-    echo "当前路径: $(pwd)"
-    echo "环境变量 COMPUTE_CAP: ${COMPUTE_CAP:-未设置}"
-    
-    # 使用多种方法获取计算能力，确保准确性
-    local RAW_OUTPUT
-    local COMPUTE_CAP_DETECTED
-    
-    # 方法1: 直接查询计算能力
-    echo -e "${CYAN}---> 方法1: 直接查询GPU计算能力${NC}"
-    RAW_OUTPUT=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null || echo "")
-    echo "原始输出: '$RAW_OUTPUT'"
-    
-    if [ -n "$RAW_OUTPUT" ]; then
-        COMPUTE_CAP_DETECTED=$(echo "$RAW_OUTPUT" | head -n 1 | tr -d '. \t\n\r')
-        echo "处理后: '$COMPUTE_CAP_DETECTED'"
-    fi
-    
-    # 方法2: 如果方法1失败，尝试解析GPU名称推断
-    if [ -z "$COMPUTE_CAP_DETECTED" ] || [ "$COMPUTE_CAP_DETECTED" = "0" ]; then
-        echo -e "${CYAN}---> 方法2: 通过GPU名称推断计算能力${NC}"
-        local GPU_NAME
-        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || echo "")
-        echo "GPU名称: '$GPU_NAME'"
-        
-        case "$GPU_NAME" in
-            *"RTX 4090"*|*"RTX 4080"*|*"RTX 4070"*|*"RTX 40"*)
-                COMPUTE_CAP_DETECTED="89"
-                echo "推断计算能力: 8.9 (Ada Lovelace)"
-                ;;
-            *"RTX 3090"*|*"RTX 3080"*|*"RTX 3070"*|*"RTX 30"*)
-                COMPUTE_CAP_DETECTED="86"
-                echo "推断计算能力: 8.6 (Ampere)"
-                ;;
-            *"RTX 2080"*|*"RTX 2070"*|*"RTX 20"*|*"GTX 16"*)
-                COMPUTE_CAP_DETECTED="75"
-                echo "推断计算能力: 7.5 (Turing)"
-                ;;
-            *"GTX 1080"*|*"GTX 1070"*|*"GTX 10"*)
-                COMPUTE_CAP_DETECTED="61"
-                echo "推断计算能力: 6.1 (Pascal)"
-                ;;
-            *)
-                echo -e "${YELLOW}警告: 无法识别GPU型号，使用默认值 7.5${NC}"
-                COMPUTE_CAP_DETECTED="75"
-                ;;
-        esac
-    fi
-    
-    # 最终验证
-    if [ -z "$COMPUTE_CAP_DETECTED" ] || [ "$COMPUTE_CAP_DETECTED" = "0" ]; then
+    COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | head -n 1 | tr -d '.')
+    if [ -z "$COMPUTE_CAP" ]; then
         echo -e "${RED}错误: 无法确定 GPU 计算能力。${NC}"
         exit 1
     fi
+    echo -e "${GREEN}---> 已检测到计算能力为: ${COMPUTE_CAP}${NC}"
+    echo "$COMPUTE_CAP"
+}
+
+# --- 函数：检查Makefile中的COMPUTE_CAP值 ---
+check_makefile_compute_cap() {
+    local makefile_path="$1"
+    local current_cap="$2"
     
-    echo -e "${GREEN}---> 最终检测到的计算能力: ${COMPUTE_CAP_DETECTED}${NC}"
-    echo "$COMPUTE_CAP_DETECTED"
+    if [ ! -f "$makefile_path" ]; then
+        echo "false"
+        return
+    fi
+    
+    # 从Makefile中提取COMPUTE_CAP值
+    local makefile_cap=$(grep -E "^COMPUTE_CAP\s*=" "$makefile_path" 2>/dev/null | head -n 1 | sed 's/.*=\s*//' | tr -d ' ')
+    
+    if [ -z "$makefile_cap" ]; then
+        echo "false"
+        return
+    fi
+    
+    echo -e "${CYAN}---> Makefile中的COMPUTE_CAP: ${makefile_cap}${NC}"
+    echo -e "${CYAN}---> 当前GPU的COMPUTE_CAP: ${current_cap}${NC}"
+    
+    if [ "$makefile_cap" = "$current_cap" ]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+# --- 函数：安装BitCrack ---
+install_bitcrack() {
+    local detected_cap="$1"
+    local reason="$2"
+    
+    echo -e "${YELLOW}---> ${reason}，开始安装BitCrack...${NC}"
+    [ -d "BitCrack" ] && rm -rf BitCrack
+    
+    git clone https://github.com/brichard19/BitCrack.git
+    cd BitCrack
+    echo -e "${YELLOW}---> 使用检测到的 COMPUTE_CAP=${detected_cap} 开始 'make' 编译...${NC}"
+    make clean || true
+    make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1 COMPUTE_CAP="${detected_cap}"
+    cd ..
+    echo -e "${GREEN}---> BitCrack 安装完成！${NC}"
 }
 
 # --- 主脚本逻辑 ---
@@ -108,17 +95,10 @@ main() {
     echo -e "${CYAN}  运行安装脚本 ${SCRIPT_VERSION}               ${NC}"
     echo -e "${CYAN}=====================================================${NC}"
 
-    # 环境诊断
-    echo -e "\n${YELLOW}---> 环境诊断信息${NC}"
-    echo "脚本执行方式: ${0}"
-    echo "当前用户: $(whoami)"
-    echo "当前目录: $(pwd)"
-    echo "预设环境变量 COMPUTE_CAP: ${COMPUTE_CAP:-未设置}"
-
     # 1. 安装系统依赖
     echo -e "\n${YELLOW}---> 第 1 步: 检查并安装系统依赖包...${NC}"
-    apt-get update
-    apt-get install -y build-essential git cmake python3 python3-pip libgmp-dev libsecp256k1-dev ocl-icd-opencl-dev nvidia-cuda-toolkit
+    sudo apt-get update
+    sudo apt-get install -y build-essential git cmake python3 python3-pip libgmp-dev libsecp256k1-dev ocl-icd-opencl-dev nvidia-cuda-toolkit
     echo -e "${GREEN}---> 依赖包检查与安装完成。${NC}"
 
     # 2. 安装 KeyHunt
@@ -138,6 +118,7 @@ main() {
     
     # 验证 KeyHunt
     echo -e "${YELLOW}---> 正在验证 KeyHunt...${NC}"
+    # 捕获帮助命令的输出，如果命令失败则输出为空
     validation_output=$(./keyhunt/keyhunt -h 2>/dev/null || true)
     if [ -n "$validation_output" ]; then
         echo -e "${CYAN}--- KeyHunt 帮助信息 ---${NC}"
@@ -151,52 +132,34 @@ main() {
     # 3. 安装 BitCrack
     echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
     
-    # 首先检测计算能力（无论是否已安装）
+    # 检测当前GPU的计算能力
     local DETECTED_CAP
     DETECTED_CAP=$(detect_compute_capability)
     
-    # 检查是否需要重新编译
-    NEED_RECOMPILE=false
+    # 检查是否需要安装或重新安装BitCrack
+    local need_install=false
+    local install_reason=""
     
     if [ ! -f "BitCrack/bin/cuBitCrack" ]; then
-        echo -e "未找到 bitcrack 可执行文件，开始全新安装..."
-        NEED_RECOMPILE=true
+        need_install=true
+        install_reason="未找到 BitCrack 可执行文件"
     else
-        echo -e "检测到 BitCrack 已存在，正在验证计算能力匹配..."
+        echo -e "${GREEN}---> 检测到 BitCrack 已安装，正在检查COMPUTE_CAP配置...${NC}"
         
-        # 进行快速运行测试来检查计算能力是否匹配
-        test_output=$(./BitCrack/bin/cuBitCrack -d 0 --keyspace 1:2 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH 2>&1 | head -n 10 || true)
+        # 检查Makefile中的COMPUTE_CAP值是否匹配
+        local cap_match=$(check_makefile_compute_cap "BitCrack/Makefile" "$DETECTED_CAP")
         
-        if echo "$test_output" | grep -q -E "(compute capability|CUDA error|no kernel image)"; then
-            echo -e "${RED}检测到计算能力不匹配，需要重新编译！${NC}"
-            echo "错误输出预览: $(echo "$test_output" | head -n 2)"
-            NEED_RECOMPILE=true
+        if [ "$cap_match" = "false" ]; then
+            need_install=true
+            install_reason="Makefile中的COMPUTE_CAP值与当前GPU不匹配，需要重新编译"
         else
-            echo -e "${GREEN}现有的 BitCrack 编译版本运行正常。${NC}"
+            echo -e "${GREEN}---> COMPUTE_CAP配置正确，跳过安装步骤。${NC}"
         fi
     fi
     
-    # 根据检测结果决定是否重新编译
-    if [ "$NEED_RECOMPILE" = true ]; then
-        echo -e "${YELLOW}开始重新编译 BitCrack...${NC}"
-        [ -d "BitCrack" ] && rm -rf BitCrack
-        
-        git clone https://github.com/brichard19/BitCrack.git
-        cd BitCrack
-        echo -e "${YELLOW}---> 使用检测到的 COMPUTE_CAP=${DETECTED_CAP} 开始编译...${NC}"
-        
-        # 清理并重新编译，明确指定计算能力
-        make clean || true
-        
-        # 强制覆盖任何预设的COMPUTE_CAP环境变量
-        COMPUTE_CAP="${DETECTED_CAP}" make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1 COMPUTE_CAP="${DETECTED_CAP}"
-        cd ..
-        echo -e "${GREEN}---> BitCrack 重新编译完成！${NC}"
-        
-        # 编译后验证
-        if [ -f "BitCrack/bin/cuBitCrack" ]; then
-            echo -e "${CYAN}---> 编译验证：使用的计算能力 = ${DETECTED_CAP}${NC}"
-        fi
+    # 根据检查结果决定是否安装
+    if [ "$need_install" = true ]; then
+        install_bitcrack "$DETECTED_CAP" "$install_reason"
     fi
     
     # 验证 BitCrack
@@ -208,16 +171,6 @@ main() {
             echo "$validation_output"
             echo -e "${CYAN}---------------------------${NC}"
             BITCRACK_SUCCESS=true
-            
-            # 额外的运行时测试
-            echo -e "${YELLOW}---> 进行运行时测试...${NC}"
-            test_output=$(./BitCrack/bin/cuBitCrack -d 0 --keyspace 1:2 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH 2>&1 | head -n 5 || true)
-            if echo "$test_output" | grep -q "compute capability"; then
-                echo -e "${RED}警告: 检测到计算能力不匹配问题${NC}"
-                echo "测试输出: $test_output"
-            else
-                echo -e "${GREEN}运行时测试通过${NC}"
-            fi
         else
             echo -e "${RED}---> BitCrack 验证失败：无法执行或没有帮助信息输出。${NC}"
         fi
@@ -237,7 +190,7 @@ main() {
     fi
 
     if [ "$BITCRACK_SUCCESS" = true ]; then
-        echo -e "  [ ${GREEN}成功${NC} ] BitCrack (GPU)"
+        echo -e "  [ ${GREEN}成功${NC} ] BitCrack (GPU) - COMPUTE_CAP: ${DETECTED_CAP}"
     else
         echo -e "  [ ${RED}失败${NC} ] BitCrack (GPU)"
     fi
