@@ -30,17 +30,16 @@ BITCRACK_SUCCESS=false
 
 # --- 函数：检测 NVIDIA GPU 的计算能力 ---
 detect_compute_capability() {
-    echo -e "${YELLOW}---> 正在检测 NVIDIA GPU 计算能力...${NC}"
     if ! command -v nvidia-smi &> /dev/null; then
-        echo -e "${RED}错误: 未找到 'nvidia-smi' 命令。${NC}"
+        echo -e "${RED}错误: 未找到 'nvidia-smi' 命令。${NC}" >&2
         exit 1
     fi
+    local COMPUTE_CAP
     COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | head -n 1 | tr -d '.')
     if [ -z "$COMPUTE_CAP" ]; then
-        echo -e "${RED}错误: 无法确定 GPU 计算能力。${NC}"
+        echo -e "${RED}错误: 无法确定 GPU 计算能力。${NC}" >&2
         exit 1
     fi
-    echo -e "${GREEN}---> 已检测到计算能力为: ${COMPUTE_CAP}${NC}"
     echo "$COMPUTE_CAP"
 }
 
@@ -144,8 +143,10 @@ main() {
     echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
     
     # 检测当前 GPU 的计算能力
+    echo -e "${YELLOW}---> 正在检测 NVIDIA GPU 计算能力...${NC}"
     local DETECTED_CAP
     DETECTED_CAP=$(detect_compute_capability)
+    echo -e "${GREEN}---> 已检测到计算能力为: ${DETECTED_CAP}${NC}"
     
     local need_reinstall=false
     
@@ -165,6 +166,7 @@ main() {
     # 如果需要全新安装
     if [ "$need_reinstall" = true ]; then
         [ -d "BitCrack" ] && rm -rf BitCrack
+        echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
         git clone https://github.com/brichard19/BitCrack.git
         cd BitCrack
         echo -e "${YELLOW}---> 正在设置 COMPUTE_CAP=${DETECTED_CAP} 并开始编译...${NC}"
