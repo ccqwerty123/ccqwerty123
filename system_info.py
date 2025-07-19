@@ -37,9 +37,10 @@ FILE_PRIV_KEY_RE = re.compile(r'([0-9a-fA-F]{64})')
 
 def display_system_info():
     """在主控窗口显示简要的系统信息"""
-    print("--- 系统状态 (BitCrack 最终测试版) ---")
+    print("--- 系统状态 (BitCrack 最终修复版) ---")
     try:
-        cmd = ['nvidia-smi', '--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,total', '--format=csv,noheader,nounits']
+        # 【已修复】将 'total' 改回正确的 'memory.total'
+        cmd = ['nvidia-smi', '--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits']
         gpu_info = subprocess.check_output(cmd, text=True).strip()
         gpu_data = gpu_info.split(', ')
         print(f"✅ GPU: {gpu_data[0]} | Temp: {gpu_data[1]}°C | Util: {gpu_data[2]}% | Mem: {gpu_data[3]}/{gpu_data[4]} MiB")
@@ -79,51 +80,41 @@ def unified_monitor(file_path, pipe_path, bitcrack_process):
     """【统一监控循环】在一个线程里同时检查文件和屏幕输出。"""
     global FOUND_PRIVATE_KEY, FOUND_METHOD
     print("✅ [统一监控] 线程已启动，同时监控文件和屏幕...")
-
-    # 打开管道并设置为非阻塞模式，这样读取时不会卡住
-    with open(pipe_path, 'r') as fifo:
-        os.set_blocking(fifo.fileno(), False)
-        
-        while not key_found_event.is_set():
-            # 检查1: 文件 (最优先)
-            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+    try:
+        with open(pipe_path, 'r') as fifo:
+            os.set_blocking(fifo.fileno(), False)
+            while not key_found_event.is_set():
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    try:
+                        with open(file_path, 'r') as f_check: match = FILE_PRIV_KEY_RE.search(f_check.read())
+                        if match:
+                            FOUND_PRIVATE_KEY, FOUND_METHOD = match.group(1).lower(), "文件读取"
+                            key_found_event.set()
+                            break
+                    except IOError: pass
                 try:
-                    with open(file_path, 'r') as f:
-                        match = FILE_PRIV_KEY_RE.search(f.read())
-                    if match:
-                        FOUND_PRIVATE_KEY = match.group(1).lower()
-                        FOUND_METHOD = "文件读取"
-                        key_found_event.set()
-                        break
-                except IOError: pass # 文件可能正在被写入，忽略
-
-            # 检查2: 屏幕输出 (备用)
-            try:
-                line = fifo.read()
-                if line:
-                    match = STDOUT_PRIV_KEY_RE.search(line)
-                    if match:
-                        FOUND_PRIVATE_KEY = match.group(1).lower()
-                        FOUND_METHOD = "屏幕输出"
-                        key_found_event.set()
-                        break
-            except Exception: pass
-
-            # 检查3: 进程是否已结束
-            if bitcrack_process.poll() is not None:
-                print("[统一监控] 检测到 BitCrack 进程已结束。")
-                break # 退出监控循环
-
-            time.sleep(0.3) # 循环间隔
-
+                    line = fifo.read()
+                    if line:
+                        match = STDOUT_PRIV_KEY_RE.search(line)
+                        if match:
+                            FOUND_PRIVATE_KEY, FOUND_METHOD = match.group(1).lower(), "屏幕输出"
+                            key_found_event.set()
+                            break
+                except Exception: pass
+                if bitcrack_process.poll() is not None:
+                    print("[统一监控] 检测到 BitCrack 进程已结束。")
+                    break
+                time.sleep(0.3)
+    except Exception: pass
     print("[统一监控] 监控循环结束。")
-
 
 def main():
     """主函数，负责设置和启动测试任务。"""
+    # 【已修复】在函数开头声明 global，解决 UnboundLocalError
+    global FOUND_PRIVATE_KEY, FOUND_METHOD
+
     if not shutil.which('xfce4-terminal'):
-        print("错误: 'xfce4-terminal' 未找到。")
-        sys.exit(1)
+        print("错误: 'xfce4-terminal' 未找到。"); sys.exit(1)
 
     display_system_info()
     time.sleep(1)
@@ -131,10 +122,7 @@ def main():
     try:
         print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
-        found_file = os.path.join(OUTPUT_DIR, 'found_keys_test.txt')
-        progress_file = os.path.join(OUTPUT_DIR, 'progress_test.dat')
-        
+        found_file, progress_file = os.path.join(OUTPUT_DIR, 'found_keys_test.txt'), os.path.join(OUTPUT_DIR, 'progress.dat')
         if os.path.exists(found_file): os.remove(found_file)
 
         gpu_params = get_gpu_params()
@@ -146,7 +134,6 @@ def main():
             '--continue', progress_file, BTC_ADDRESS
         ]
         
-        # --- 启动进程 ---
         pipe_path = PIPE_BC
         if os.path.exists(pipe_path): os.remove(pipe_path)
         os.mkfifo(pipe_path)
@@ -156,23 +143,17 @@ def main():
         processes_to_cleanup.append(terminal_process)
         print(f"✅ BitCrack 已在新窗口启动...")
         
-        # --- 启动统一监控线程 ---
         monitor_thread = threading.Thread(target=unified_monitor, args=(found_file, pipe_path, terminal_process))
         monitor_thread.start()
-        monitor_thread.join() # 等待监控循环结束 (无论是找到key还是进程结束)
+        monitor_thread.join()
         
-        # --- 【最后的机会】检查 ---
-        # 如果监控循环结束了但还没找到key，就最后再检查一次文件
         if not FOUND_PRIVATE_KEY:
             print("INFO: 正在进行最终文件检查...")
             if os.path.exists(found_file) and os.path.getsize(found_file) > 0:
-                with open(found_file, 'r') as f:
-                    match = FILE_PRIV_KEY_RE.search(f.read())
+                with open(found_file, 'r') as f: match = FILE_PRIV_KEY_RE.search(f.read())
                 if match:
-                    FOUND_PRIVATE_KEY = match.group(1).lower()
-                    FOUND_METHOD = "最终文件检查"
+                    FOUND_PRIVATE_KEY, FOUND_METHOD = match.group(1).lower(), "最终文件检查"
         
-        # --- 显示最终结果 ---
         print("\n" + "="*50)
         if FOUND_PRIVATE_KEY:
             print(f"🎉🎉🎉 测试成功！通过【{FOUND_METHOD}】捕获到密钥！🎉🎉🎉")
