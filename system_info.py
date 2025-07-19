@@ -14,18 +14,8 @@ import shutil
 
 BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack'
 
-# 【已修复】智能获取桌面路径，避免权限问题
-try:
-    # 如果使用 sudo 运行，通过环境变量找到原始用户的家目录
-    if 'SUDO_USER' in os.environ:
-        user_home = os.path.expanduser(f"~{os.environ['SUDO_USER']}")
-    else:
-        user_home = os.path.expanduser("~")
-    OUTPUT_DIR = os.path.join(user_home, 'Desktop', 'bitcrack_output')
-except Exception:
-    # 如果上述方法失败，则使用一个通用的工作区路径
-    OUTPUT_DIR = '/workspace/bitcrack_output'
-
+# 【已修复】直接在当前工作区创建输出目录，彻底避免权限问题
+OUTPUT_DIR = '/workspace/bitcrack_test_output'
 
 # 用于快速找到密钥的测试地址和范围
 BTC_ADDRESS = '19ZewH8Kk1PDbSNdJ97FP4EiCjTRaZMZQA'
@@ -38,7 +28,7 @@ FOUND_PRIVATE_KEY = None
 key_found_event = threading.Event()
 processes_to_cleanup = []
 
-PIPE_BC = '/tmp/bitcrack_pipe'
+PIPE_BC = '/tmp/bitcrack_pipe' # 临时管道文件
 
 # cuBitCrack 的私钥正则表达式
 CUBITCRACK_PRIV_KEY_RE = re.compile(r'Priv:([0-9a-fA-F]{64})')
@@ -58,23 +48,20 @@ def display_system_info():
     print("-" * 35)
 
 def get_gpu_params():
-    """【已修复】尝试自动检测GPU，如果失败则回退到安全的默认值。"""
-    print("INFO: 正在根据 GPU 硬件自动配置性能参数...")
+    """尝试自动检测GPU，如果失败则回退到安全的默认值。"""
+    print("INFO: 正在配置 GPU 性能参数...")
     default_params = {'blocks': 288, 'threads': 256, 'points': 1024}
     try:
-        # 尝试自动检测
         result = subprocess.run(
             ['nvidia-smi', '--query-gpu=multiprocessor_count', '--format=csv,noheader'],
             capture_output=True, text=True, check=True, env=os.environ
         )
         sm_count = int(result.stdout.strip())
         blocks, threads, points = sm_count * 7, 256, 1024
-        print(f"INFO: 成功检测到 GPU 有 {sm_count} SMs。自动配置: -b {blocks} -t {threads} -p {points}")
+        print(f"INFO: 成功检测到 GPU。自动配置: -b {blocks} -t {threads} -p {points}")
         return {'blocks': blocks, 'threads': threads, 'points': points}
-    except Exception as e:
-        # 如果失败，则使用默认值并告知用户
-        print(f"WARN: 自动检测GPU失败，将为 cuBitCrack 使用已知可行的默认参数。")
-        print(f"      (错误信息: {e})")
+    except Exception:
+        print(f"WARN: 自动检测GPU失败，将使用已知可行的默认参数。")
         return default_params
 
 # --- 4. 核心执行逻辑与进程管理 ---
@@ -114,11 +101,10 @@ def run_bitcrack_and_monitor(command, pipe_path):
                 match = CUBITCRACK_PRIV_KEY_RE.search(line)
                 if match:
                     FOUND_PRIVATE_KEY = match.group(1).lower()
-                    key_found_event.set() # 发送信号：已找到！
+                    key_found_event.set()
                     break
     except Exception as e:
-        if not key_found_event.is_set():
-            print(f"ERROR: 监控 BitCrack 的管道时出错: {e}")
+        if not key_found_event.is_set(): print(f"ERROR: 监控管道时出错: {e}")
     finally:
         print("[BitCrack] 监控线程结束。")
 
@@ -132,7 +118,7 @@ def main():
     time.sleep(1)
 
     try:
-        # 使用修复后的安全方式创建目录
+        # 【已修复】使用 exist_ok=True，如果目录已存在，则不会报错
         print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
@@ -161,9 +147,10 @@ def main():
         if FOUND_PRIVATE_KEY:
             print("🎉🎉🎉 测试成功！BitCrack 找到了密钥！🎉🎉🎉")
             print(f"\n  完整私钥 (HEX): {FOUND_PRIVATE_KEY}\n")
+            print(f"  相关文件已保存至: {OUTPUT_DIR}")
             print("所有进程将自动关闭。")
         else:
-            print("搜索任务已结束，但未通过监控捕获到密钥。请检查监控窗口是否有 'Hit!' 字样。")
+            print("搜索任务已结束，但未通过监控捕获到密钥。")
         print("="*50)
 
     except FileNotFoundError as e:
