@@ -1,7 +1,7 @@
 #!/bin.bash
 #
 # KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
-# 版本: 1.3.1 - 智能COMPUTE_CAP检测版
+# 版本: 1.3.2 - 修复COMPUTE_CAP检测和清理版
 #
 # 特性:
 # 1. 版本控制: 启动时显示版本号。
@@ -12,7 +12,7 @@
 #
 
 # --- 脚本版本 ---
-SCRIPT_VERSION="1.3.1 - 智能COMPUTE_CAP检测版"
+SCRIPT_VERSION="1.3.2 - 修复COMPUTE_CAP检测和清理版"
 
 # --- Bash 颜色代码 ---
 GREEN='\033[0;32m'
@@ -54,8 +54,8 @@ check_makefile_compute_cap() {
         return
     fi
     
-    # 从Makefile中提取COMPUTE_CAP值
-    local makefile_cap=$(grep -E "^COMPUTE_CAP\s*=" "$makefile_path" 2>/dev/null | head -n 1 | sed 's/.*=\s*//' | tr -d ' ')
+    # 从Makefile中提取COMPUTE_CAP值 - 改进的正则表达式
+    local makefile_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' "$makefile_path" 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//')
     
     if [ -z "$makefile_cap" ]; then
         echo "false"
@@ -78,13 +78,35 @@ install_bitcrack() {
     local reason="$2"
     
     echo -e "${YELLOW}---> ${reason}，开始安装BitCrack...${NC}"
-    [ -d "BitCrack" ] && rm -rf BitCrack
+    
+    # 如果目录存在，先完全清理
+    if [ -d "BitCrack" ]; then
+        echo -e "${YELLOW}---> 清理旧的 BitCrack 安装...${NC}"
+        rm -rf BitCrack
+    fi
     
     git clone https://github.com/brichard19/BitCrack.git
     cd BitCrack
-    echo -e "${YELLOW}---> 使用检测到的 COMPUTE_CAP=${detected_cap} 开始 'make' 编译...${NC}"
+    
+    # 修改 Makefile 中的 COMPUTE_CAP 值
+    echo -e "${YELLOW}---> 设置 COMPUTE_CAP=${detected_cap} 到 Makefile...${NC}"
+    sed -i "s/^[[:space:]]*COMPUTE_CAP[[:space:]]*=.*/COMPUTE_CAP=${detected_cap}/" Makefile
+    
+    # 验证修改是否成功
+    local updated_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' Makefile | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//')
+    echo -e "${CYAN}---> Makefile 已更新，COMPUTE_CAP=${updated_cap}${NC}"
+    
+    # 彻底清理并编译
+    echo -e "${YELLOW}---> 开始编译 BitCrack...${NC}"
     make clean || true
-    make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1 COMPUTE_CAP="${detected_cap}"
+    
+    # 清理可能残留的目标文件
+    find . -name "*.o" -type f -delete 2>/dev/null || true
+    find . -name "*.a" -type f -delete 2>/dev/null || true
+    
+    # 使用修改后的 Makefile 进行编译
+    make -j$(nproc) BUILD_CUDA=1
+    
     cd ..
     echo -e "${GREEN}---> BitCrack 安装完成！${NC}"
 }
