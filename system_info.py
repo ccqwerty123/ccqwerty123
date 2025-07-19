@@ -1,134 +1,160 @@
-import sys
 import subprocess
-import platform
 import os
-import math
-import re
+import threading
+import sys
+import atexit
 
-# --- 依赖检测 ---
-try:
-    import psutil
-except ImportError:
-    print("错误: 缺少 'psutil' 库。")
-    print("\n请尝试手动运行以下命令来安装它:")
-    print("  `python3 -m pip install psutil --break-system-packages` 或使用虚拟环境。")
-    sys.exit(1)
+# --- 1. 基础配置 (可按需修改) ---
 
-def parse_cpu_set(cpu_set_str):
-    """解析 CPU 集合字符串 (例如 '0-3,7') 并返回核心数。"""
-    count = 0
-    if not cpu_set_str:
-        return 0
-    # 移除所有空白字符
-    cpu_set_str = re.sub(r'\s+', '', cpu_set_str)
-    
-    parts = cpu_set_str.split(',')
-    for part in parts:
-        if '-' in part:
-            start, end = map(int, part.split('-'))
-            count += (end - start + 1)
-        else:
-            count += 1
-    return count
+# 可执行文件的路径
+KEYHUNT_PATH = '/workspace/keyhunt/keyhunt'
+BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack'
 
-def get_effective_cpu_count():
-    """
-    通过多种方法检测真实可用的CPU核心数，返回一个整数和检测方法。
-    """
-    # --- 方法 1: 检查 Cgroup v2 CPU 配额 ---
+# 搜索的目标比特币地址
+BTC_ADDRESS = '1DBaumZxUkM4qMQRt2LVWyFJq5kDtSZQot'
+
+# 密钥搜索范围
+START_KEY = '0000000000000000000000000000000000000000000000000000000000000800'
+END_KEY = '0000000000000000000000000000000000000000000000000000000000000fff'
+
+# 文件路径
+KH_ADDRESS_FILE = '/workspace/target_address.txt'
+BC_FOUND_FILE = '/workspace/found.txt'
+BC_PROGRESS_FILE = '/workspace/progress.dat'
+
+# --- 2. 智能硬件检测与参数调整 ---
+
+def get_cpu_threads():
+    """自动检测CPU核心数并返回一个合理的线程数。"""
     try:
-        cpu_max_path = "/sys/fs/cgroup/cpu.max"
-        if os.path.exists(cpu_max_path):
-            with open(cpu_max_path, 'r') as f:
-                content = f.read().strip()
-            parts = content.split()
-            if len(parts) == 2 and parts[0] != 'max':
-                quota, period = map(int, parts)
-                if quota > 0 and period > 0:
-                    return max(1, math.floor(quota / period)), "Cgroup v2 Quota"
-    except Exception:
-        pass # 忽略错误，继续下一种方法
+        cpu_cores = os.cpu_count()
+        # 使用 总核心数-1，但最少保留1个核心给KeyHunt
+        threads = max(1, cpu_cores - 1)
+        print(f"INFO: 检测到 {cpu_cores} 个CPU核心。将为 KeyHunt 分配 {threads} 个线程。")
+        return threads
+    except Exception as e:
+        print(f"WARN: 无法自动检测CPU核心数，将使用默认值 15。错误: {e}")
+        return 15 # 如果检测失败，回退到默认值
 
-    # --- 方法 2: 检查 Cgroup v1 CPU 配额 ---
+def get_gpu_params():
+    """通过nvidia-smi自动检测GPU SM数，并返回cuBitCrack的推荐参数。"""
+    default_params = {'blocks': 288, 'threads': 256, 'points': 1024}
     try:
-        cfs_period_path = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
-        cfs_quota_path = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
-        if os.path.exists(cfs_quota_path) and os.path.exists(cfs_period_path):
-            with open(cfs_period_path, 'r') as f:
-                period = int(f.read().strip())
-            with open(cfs_quota_path, 'r') as f:
-                quota = int(f.read().strip())
-            if quota > 0 and period > 0:
-                return max(1, math.floor(quota / period)), "Cgroup v1 Quota"
-    except Exception:
-        pass
-
-    # --- 方法 3: 检查 Cgroup cpuset (核心绑定) ---
-    try:
-        # 适用于 cgroup v1 和 v2 的混合路径检查
-        cpuset_paths = [
-            "/sys/fs/cgroup/cpuset.cpus.effective", # cgroup v2
-            "/sys/fs/cgroup/cpuset/cpuset.cpus"     # cgroup v1
-        ]
-        for path in cpuset_paths:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    cpu_set_str = f.read().strip()
-                if cpu_set_str:
-                    core_count = parse_cpu_set(cpu_set_str)
-                    return core_count, f"Cgroup cpuset ({path})"
-    except Exception:
-        pass
+        # 查询GPU的流式多处理器(SM)数量
+        command = ['nvidia-smi', '--query-gpu=multiprocessor_count', '--format=csv,noheader']
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        sm_count = int(result.stdout.strip())
         
-    # --- 方法 4: 使用 'taskset' 命令作为最后的可靠手段 ---
+        # 基于SM数计算参数
+        # 策略: block数设置为SM数的倍数以充分利用GPU
+        blocks = sm_count * 7 
+        threads = 256 # 通用高效值
+        points = 1024 # 高性能值
+        
+        print(f"INFO: 检测到 GPU 有 {sm_count} 个流式多处理器 (SMs)。")
+        print(f"INFO: 将为 cuBitCrack 自动配置参数: blocks={blocks}, threads={threads}, points={points}")
+        return {'blocks': blocks, 'threads': threads, 'points': points}
+        
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+        print(f"WARN: 无法通过 nvidia-smi 自动检测GPU。将使用默认参数。错误: {e}")
+        return default_params # 如果检测失败，回退到默认值
+
+# --- 3. 进程管理与执行逻辑 (无需修改) ---
+
+key_found_event = threading.Event()
+processes = []
+
+def cleanup():
+    """程序退出时，确保所有子进程都被终止。"""
+    for p in processes:
+        if p.poll() is None:
+            p.terminate()
+            p.wait()
+
+atexit.register(cleanup)
+
+def run_and_monitor(command, tool_name):
+    """在线程中运行命令，监控输出，并在找到密钥时触发全局停止事件。"""
+    global processes
+    print("-" * 60)
+    print(f"🚀 正在启动 {tool_name}...")
+    print(f"   执行命令: {' '.join(command)}")
+    print("-" * 60)
+    
     try:
-        # 获取当前进程的 PID
-        pid = os.getpid()
-        # 运行 taskset 命令
-        result = subprocess.run(
-            ['taskset', '-c', '-p', str(pid)],
-            capture_output=True, text=True, check=True
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
-        # 输出通常是 "pid <PID>'s current affinity list: <LIST>"
-        affinity_list_str = result.stdout.split(':')[-1].strip()
-        core_count = parse_cpu_set(affinity_list_str)
-        return core_count, "taskset Command"
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        # FileNotFoundError: taskset 命令不存在
-        # CalledProcessError: 命令执行失败
-        pass
+        processes.append(process)
+
+        while not key_found_event.is_set():
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None: break
+            if output:
+                sys.stdout.write(f"[{tool_name}] {output.strip()}\n")
+                sys.stdout.flush()
+                if 'KEY FOUND' in output.upper() or 'PRIVATE KEY' in output.upper():
+                    print("\n" + "="*80)
+                    print(f"🎉🎉🎉 胜利！ {tool_name} 找到了密钥！正在停止所有搜索... 🎉🎉🎉")
+                    print("="*80 + "\n")
+                    key_found_event.set()
+                    break
         
-    # --- 最终回退 ---
-    return os.cpu_count(), "Fallback (可能不准确)"
+        if process.poll() is None: process.terminate()
+        process.wait()
+        print(f"[{tool_name}] 进程已停止。")
 
-def get_system_info():
-    """收集并打印系统信息。"""
+    except Exception as e:
+        print(f"[{tool_name}] 发生严重错误: {e}")
+        key_found_event.set()
+
+def main():
+    """主函数，用于并行启动搜索任务。"""
+    print("="*80)
+    print("正在根据系统硬件自动配置性能参数...")
     
-    print("="*40, "物理主机信息", "="*40)
-    uname = platform.uname()
-    print(f"操作系统: {uname.system} {uname.release}")
-    print(f"处理器架构: {uname.machine}")
-    print(f"物理/逻辑核心数: {psutil.cpu_count(logical=False)} / {psutil.cpu_count(logical=True)}")
-    svmem = psutil.virtual_memory()
-    print(f"总内存: {svmem.total / (1024**3):.2f} GB")
-
-    print("\n" + "="*35, "您的环境可用资源分析", "="*35)
+    # 获取动态参数
+    keyhunt_threads = get_cpu_threads()
+    cubitcrack_params = get_gpu_params()
     
-    usable_cores, method = get_effective_cpu_count()
+    print("="*80)
 
-    print(f"检测方法: {method}")
+    # 准备文件
+    with open(KH_ADDRESS_FILE, 'w') as f: f.write(BTC_ADDRESS)
+    
+    # 构建命令
+    keyhunt_command = [
+        KEYHUNT_PATH, '-m', 'address', '-f', KH_ADDRESS_FILE,
+        '-l', 'both', '-t', str(keyhunt_threads),
+        '-r', f'{START_KEY}:{END_KEY}'
+    ]
 
-    if method == "Fallback (可能不准确)":
-        print(f"⚠️  警告: 未能通过任何方法检测到CPU限制。")
-        print(f"   以下数字代表物理主机，很可能不代表您的真实配额！")
+    bitcrack_command = [
+        BITCRACK_PATH,
+        '-b', str(cubitcrack_params['blocks']),
+        '-t', str(cubitcrack_params['threads']),
+        '-p', str(cubitcrack_params['points']),
+        '--keyspace', f'{START_KEY}:{END_KEY}',
+        '-o', BC_FOUND_FILE, '--continue', BC_PROGRESS_FILE,
+        BTC_ADDRESS
+    ]
+
+    # 创建并启动线程
+    thread_keyhunt = threading.Thread(target=run_and_monitor, args=(keyhunt_command, "KeyHunt"))
+    thread_bitcrack = threading.Thread(target=run_and_monitor, args=(bitcrack_command, "BitCrack"))
+
+    thread_keyhunt.start()
+    thread_bitcrack.start()
+
+    thread_keyhunt.join()
+    thread_bitcrack.join()
+    
+    print("\n" + "="*80)
+    if key_found_event.is_set():
+        print(f"搜索结束！请检查上方日志和输出文件 '{BC_FOUND_FILE}'。")
     else:
-        print("✅ 成功检测到环境的CPU限制。")
+        print("所有搜索任务已在指定范围内完成，未找到密钥。")
+    print("="*80)
 
-    print(f"推荐的可用核心数 (用于并行计算): {usable_cores}")
-    
-    print("\n" + "="*90)
-    print(f"💡 结论: 在需要并行处理时，建议您使用 **{usable_cores}** 个工作进程。")
-    print("="*90)
-
-if __name__ == "__main__":
-    get_system_info()
+if __name__ == '__main__':
+    main()
