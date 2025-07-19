@@ -6,17 +6,14 @@ import sys
 import atexit
 import re
 import shlex
-import psutil
 import time
 import shutil
 
-# --- 1. 基础配置 (已按要求修改) ---
+# --- 1. 基础配置 ---
 
 KEYHUNT_PATH = '/workspace/keyhunt/keyhunt'
-# 【已修改】输出目录改为临时目录
-OUTPUT_DIR = '/tmp/keyhunt_test_output'
-# 【已增加】定义找到的密钥的输出文件路径
-FOUND_FILE_PATH = os.path.join(OUTPUT_DIR, 'found_keys.txt')
+# 【已修改】临时目录仅用于存放输入文件
+OUTPUT_DIR = '/tmp/keyhunt_run_temp'
 
 BTC_ADDRESS = '1DBaumZxUkM4qMQRt2LVWyFJq5kDtSZQot'
 START_KEY = '0000000000000000000000000000000000000000000000000000000000000800'
@@ -28,8 +25,10 @@ END_KEY =   '0000000000000000000000000000000000000000000000000000000000000fff'
 processes_to_cleanup = []
 PIPE_KH = '/tmp/keyhunt_pipe'
 
-# 匹配屏幕或文件输出中的私钥
-# 支持 "Private key (hex): ...", "Hit! Private Key: ...", "Priv: ..." 等多种格式
+# 【新】使用列表来存储所有从屏幕捕获的密钥
+ALL_FOUND_KEYS = []
+
+# 匹配屏幕输出中的私钥
 KEYHUNT_PRIV_KEY_RE = re.compile(r'(?:Private key \(hex\)|Hit! Private Key|Priv):\s*([0-9a-fA-F]+)')
 
 
@@ -37,7 +36,7 @@ KEYHUNT_PRIV_KEY_RE = re.compile(r'(?:Private key \(hex\)|Hit! Private Key|Priv)
 
 def display_system_info():
     """在主控窗口显示简要的系统信息"""
-    print("--- 系统状态 (KeyHunt 测试模式) ---")
+    print("--- 系统状态 (KeyHunt 最终修复版) ---")
     try:
         cpu_usage = psutil.cpu_percent(interval=0.2)
         cpu_cores = psutil.cpu_count(logical=True)
@@ -50,7 +49,6 @@ def get_cpu_threads():
     """自动检测CPU核心数并返回合理的线程数。"""
     try:
         cpu_cores = os.cpu_count()
-        # 在多核CPU上保留一个核心给系统，避免卡顿
         threads = max(1, cpu_cores - 1 if cpu_cores > 1 else 1)
         print(f"INFO: 检测到 {cpu_cores} 个CPU核心。将为 KeyHunt 分配 {threads} 个线程。")
         return threads
@@ -62,49 +60,53 @@ def get_cpu_threads():
 # --- 4. 核心执行逻辑与最终报告 ---
 
 def cleanup():
-    """程序退出时，仅负责清理子进程和管道。"""
+    """程序退出时，清理子进程和管道文件。"""
     print("\n[CLEANUP] 正在清理所有子进程和管道...")
     for p in processes_to_cleanup:
         if p.poll() is None:
             try: p.terminate(); p.wait(timeout=2)
             except: p.kill()
     if os.path.exists(PIPE_KH): os.remove(PIPE_KH)
+    # 同时清理临时目录
+    if os.path.exists(OUTPUT_DIR): shutil.rmtree(OUTPUT_DIR)
     print("[CLEANUP] 清理完成。")
 
 atexit.register(cleanup)
 
 def generate_final_report():
-    """【新功能】读取文件并生成最终的密钥报告。"""
+    """【已修复】从内存中的列表生成最终报告。"""
     print("="*60)
-    print(f"INFO: 正在读取最终结果文件: {FOUND_FILE_PATH}")
-
-    found_keys = []
-    if os.path.exists(FOUND_FILE_PATH):
-        with open(FOUND_FILE_PATH, 'r') as f:
-            content = f.read()
-            # 使用正则表达式查找所有匹配的密钥
-            found_keys = KEYHUNT_PRIV_KEY_RE.findall(content)
-
-    if found_keys:
-        print(f"🎉🎉🎉 任务结束！共在文件中找到 {len(found_keys)} 个密钥！🎉🎉🎉")
+    print("INFO: 正在整理所有从屏幕捕获到的密钥...")
+    
+    if ALL_FOUND_KEYS:
+        print(f"🎉🎉🎉 任务结束！共捕获到 {len(ALL_FOUND_KEYS)} 个密钥！🎉🎉🎉")
         print("-" * 60)
-        for i, key in enumerate(found_keys):
+        for i, key in enumerate(ALL_FOUND_KEYS):
             # 将不足64位的密钥在左侧补0
             full_key = key.lower().zfill(64)
             print(f"  密钥 #{i+1}: {full_key}")
     else:
-        print("🔴 任务结束，但在输出文件中未找到任何密钥。")
+        print("🔴 任务结束，但在整个运行期间未从屏幕输出中捕获到任何密钥。")
     print("="*60)
 
 def keyhunt_monitor(pipe_path):
-    """【已修改】持续监控屏幕输出，keyhunt结束后此线程会自动退出。"""
-    print("✅ [监控线程] 已启动，等待 KeyHunt 进程输出...")
+    """【已修复】从管道读取所有输出，匹配并保存所有找到的密钥到列表中。"""
+    global ALL_FOUND_KEYS
+    print("✅ [监控线程] 已启动，实时捕获 KeyHunt 的屏幕输出...")
     try:
         with open(pipe_path, 'r') as fifo:
             for line in fifo:
-                # 实时打印KeyHunt的输出到主控台
+                # 实时打印到主控台，方便观察进度
                 sys.stdout.write(line)
                 sys.stdout.flush()
+                
+                match = KEYHUNT_PRIV_KEY_RE.search(line)
+                if match:
+                    found_key = match.group(1)
+                    # 将找到的密钥存入全局列表
+                    ALL_FOUND_KEYS.append(found_key)
+                    # 也可以在这里加一个实时提醒
+                    print(f"\n🔔 [实时捕获] 发现一个密钥: {found_key} 🔔\n")
     except Exception:
         pass
     print("\n[监控线程] 检测到 KeyHunt 进程已退出。")
@@ -119,25 +121,21 @@ def main():
     time.sleep(1)
 
     try:
-        print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
+        # 【说明】此目录仅用于存放 KeyHunt 需要的输入地址文件
+        print(f"INFO: 将在临时目录中创建输入文件: {OUTPUT_DIR}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        # 确保开始前输出文件是干净的
-        if os.path.exists(FOUND_FILE_PATH):
-            os.remove(FOUND_FILE_PATH)
         
         kh_address_file = os.path.join(OUTPUT_DIR, 'target_address.txt')
         with open(kh_address_file, 'w') as f: f.write(BTC_ADDRESS)
 
-        print("INFO: 正在根据系统硬件自动配置性能参数...")
         keyhunt_threads = get_cpu_threads()
         print("="*40)
         
-        # 【已修改】在命令中加入 '-o' (输出文件) 和 '-R' (范围搜索) 标志
+        # 【已修复】构建正确的 KeyHunt 命令，不使用 -o 参数
         keyhunt_command = [
             KEYHUNT_PATH,
             '-m', 'address',
             '-f', kh_address_file,
-            '-o', FOUND_FILE_PATH, # <--【增加】指定输出文件
             '-l', 'both',
             '-t', str(keyhunt_threads),
             '-R',
@@ -161,18 +159,13 @@ def main():
         # 等待监控线程结束（意味着keyhunt进程已退出）
         monitor_thread.join()
 
-        # 【新功能】keyhunt结束后，延迟并生成报告
-        print(f"\nINFO: KeyHunt 任务已完成。等待 5 秒后生成最终报告...")
-        time.sleep(5)
+        # KeyHunt结束后，直接生成报告（无需延迟，因为所有数据已在内存中）
         generate_final_report()
         print("\nINFO: 脚本执行完毕。")
 
     except KeyboardInterrupt:
         print("\n[INFO] 检测到用户中断 (Ctrl+C)，准备退出并生成最终报告...")
-        time.sleep(1)
         generate_final_report()
-    except FileNotFoundError as e:
-        print(f"\n[致命错误] 文件未找到: {e}。请检查 KEYHUNT_PATH 是否正确。")
     except Exception as e:
         print(f"\n[致命错误] 脚本主程序发生错误: {e}")
         import traceback
