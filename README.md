@@ -4,7 +4,7 @@
 wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/cloudstudio.sh | bash
 
 wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash  复杂版
-https://cloudstudio.net/a/ 安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
+安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
 
 wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash
 全自动完成 KeyHunt 和 BitCrack 的安装与验证
