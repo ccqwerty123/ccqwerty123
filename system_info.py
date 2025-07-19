@@ -10,14 +10,14 @@ import psutil
 import time
 import shutil
 
-# --- 1. 基础配置 (用于 BitCrack 快速测试) ---
+# --- 1. 基础配置 ---
 
 BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack'
 
-# 【已修复】直接在当前工作区创建输出目录，彻底避免权限问题
-OUTPUT_DIR = '/workspace/bitcrack_test_output'
+# 【最终修复】使用 /tmp 目录，该目录保证所有用户都有写入权限
+OUTPUT_DIR = '/tmp/bitcrack_test_output'
 
-# 用于快速找到密钥的测试地址和范围
+# 测试用的地址和范围
 BTC_ADDRESS = '19ZewH8Kk1PDbSNdJ97FP4EiCjTRaZMZQA'
 KEYSPACE = '0000000000000000000000000000000000000000000000000000000000000001:000000000000000000000000000000000000000000000000000000000000FFFF'
 
@@ -67,14 +67,14 @@ def get_gpu_params():
 # --- 4. 核心执行逻辑与进程管理 ---
 
 def cleanup():
-    """程序退出时，终止所有子进程并删除管道文件。"""
+    """程序退出时，清理所有子进程和临时文件。"""
     print("\n[CLEANUP] 正在清理所有子进程和管道...")
     for p in processes_to_cleanup:
         if p.poll() is None:
             try: p.terminate(); p.wait(timeout=2)
             except: p.kill()
     if os.path.exists(PIPE_BC): os.remove(PIPE_BC)
-    print("[CLEANUP] 清理完成。")
+    print(f"[CLEANUP] 清理完成。测试文件保留在 {OUTPUT_DIR}")
 
 atexit.register(cleanup)
 
@@ -88,9 +88,7 @@ def run_bitcrack_and_monitor(command, pipe_path):
     command_str = ' '.join(shlex.quote(arg) for arg in command)
     terminal_command_str = f"bash -c \"{command_str} | tee {pipe_path}; exec bash\""
 
-    terminal_process = subprocess.Popen([
-        'xfce4-terminal', '--title', '实时监控: BitCrack (GPU)', '-e', terminal_command_str
-    ])
+    terminal_process = subprocess.Popen(['xfce4-terminal', '--title', '实时监控: BitCrack (GPU)', '-e', terminal_command_str])
     processes_to_cleanup.append(terminal_process)
 
     print(f"✅ BitCrack 已在新窗口启动，主控台正在监控结果...")
@@ -118,7 +116,7 @@ def main():
     time.sleep(1)
 
     try:
-        # 【已修复】使用 exist_ok=True，如果目录已存在，则不会报错
+        # 使用 /tmp 目录，并用 exist_ok=True 安全创建
         print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
