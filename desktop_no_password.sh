@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==   一键式 XFCE 桌面安装与无密码启动脚本 v4.1 (自包含/无密码/安全修复版)   ==
+# ==   一键式 XFCE 桌面安装与无密码启动脚本 v4.2 (版本号验证版)             ==
 # ===================================================================================
 # == 作者: Kilo Code (经 Gemini 整合与增强)                                       ==
 # == 功能: 在一个全新的 Debian/Ubuntu 系统上，一键安装并以无密码模式启动服务。    ==
@@ -14,13 +14,15 @@
 # == ⚠️ 安全警告: 此脚本配置的VNC服务没有密码，请仅在绝对受信任的网络环境中使用！ ==
 #
 # == 使用方法:
-# ==   1. 将此脚本保存为 desktop_no_password.sh
+# ==   1. 彻底删除旧脚本，将此完整代码保存为 desktop_no_password.sh
 # ==   2. 赋予执行权限: chmod +x desktop_no_password.sh
 # ==   3. 使用 root 权限运行: sudo ./desktop_no_password.sh
+# ==   4. 检查输出的第一行是否为 v4.2
 #
 # ===================================================================================
 
 # --- 全局配置 ---
+SCRIPT_VERSION="4.2"              # 脚本版本号，用于验证
 VNC_USER="desktop"                # VNC 运行的用户名
 VNC_PORT="5901"                   # VNC 端口
 NOVNC_PORT="6080"                 # noVNC 网页端口
@@ -63,46 +65,17 @@ install_environment() {
     log_info "====================================================="
     log_info "==      首次运行，开始执行完整的环境安装流程...      =="
     log_info "====================================================="
-
-    # --- 步骤 1: 更新系统并安装基础依赖 ---
-    log_info "正在更新软件包列表并安装基础工具..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends \
-        software-properties-common curl wget git nano sudo dbus-x11 gpg
-
-    # --- 步骤 2: 安装 XFCE 桌面环境和中文支持 ---
-    log_info "正在安装 XFCE 桌面、中文字体和输入法..."
-    apt-get install -y --no-install-recommends \
-        xfce4 xfce4-goodies xfce4-terminal \
-        fonts-wqy-zenhei fonts-wqy-microhei fcitx5
-
-    # --- 步骤 3: 安装 VNC 和 noVNC 服务 ---
-    log_info "正在安装 TigerVNC 和 noVNC..."
-    apt-get install -y --no-install-recommends \
-        tigervnc-standalone-server novnc websockify
-
-    # --- 步骤 4: 安装常用应用软件 ---
-    log_info "正在安装 Firefox 浏览器..."
+    apt-get install -y --no-install-recommends software-properties-common curl wget git nano sudo dbus-x11 gpg
+    apt-get install -y --no-install-recommends xfce4 xfce4-goodies xfce4-terminal fonts-wqy-zenhei fonts-wqy-microhei fcitx5
+    apt-get install -y --no-install-recommends tigervnc-standalone-server novnc websockify
     apt-get install -y --no-install-recommends firefox-esr
-
-    log_info "正在安装 Visual Studio Code..."
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft.gpg
     echo "deb [arch=amd64] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list
     apt-get update -y
     apt-get install -y code
-
-    # --- 步骤 5: 创建并配置 VNC 用户 ---
-    log_info "正在创建 VNC 专用用户: $VNC_USER"
-    if ! id "$VNC_USER" &>/dev/null; then
-        useradd -m -s /bin/bash "$VNC_USER"
-        adduser "$VNC_USER" sudo
-        log_info "用户 $VNC_USER 已创建并添加到 sudo 组。"
-    else
-        log_warning "用户 $VNC_USER 已存在，跳过创建。"
-    fi
-
-    log_info "正在为用户 $VNC_USER 配置 VNC 启动脚本..."
+    if ! id "$VNC_USER" &>/dev/null; then useradd -m -s /bin/bash "$VNC_USER"; adduser "$VNC_USER" sudo; fi
     sudo -u "$VNC_USER" mkdir -p "/home/$VNC_USER/.vnc"
     cat > "/home/$VNC_USER/.vnc/xstartup" <<EOF
 #!/bin/bash
@@ -113,13 +86,7 @@ exec startxfce4
 EOF
     chmod +x "/home/$VNC_USER/.vnc/xstartup"
     chown -R "$VNC_USER":"$VNC_USER" "/home/$VNC_USER/.vnc"
-
-    # --- 步骤 6: 清理并创建安装标记 ---
-    log_info "正在清理安装缓存..."
-    apt-get autoremove -y >/dev/null
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
-
+    apt-get autoremove -y >/dev/null; apt-get clean; rm -rf /var/lib/apt/lists/*
     touch "$INSTALL_FLAG_FILE"
     log_success "======================================================="
     log_success "==         🎉 环境安装成功！🎉         =="
@@ -150,7 +117,7 @@ start_vnc_service() {
         -geometry "$VNC_GEOMETRY" \
         -localhost no \
         -SecurityTypes None \
-        --I-KNOW-THIS-IS-INSECURE # <-- 新增的关键安全选项
+        --I-KNOW-THIS-IS-INSECURE
     
     sleep 2
     if pgrep -u "$VNC_USER" -f "Xtigervnc.*:$DISPLAY_NUM" >/dev/null; then
@@ -184,10 +151,8 @@ show_service_info() {
     echo -e "${YELLOW}访问地址:${NC} http://${IP_ADDRESS}:${NOVNC_PORT}/vnc.html"
     echo
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!! 安全警告 !!!!!!!!!!!!!!!!!!!!"
-    echo -e "${RED}!!                                              !!"
     echo -e "${RED}!!  此 VNC 连接未设置密码，任何人都可以访问！   !!"
     echo -e "${RED}!!  请仅在完全受信任的网络环境中使用此配置！    !!"
-    echo -e "${RED}!!                                              !!"
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     echo
 }
@@ -197,6 +162,10 @@ show_service_info() {
 # ===================================================================================
 main() {
     check_root
+    
+    # **新增**：在脚本最开始输出版本号
+    log_info "正在运行脚本版本: ${GREEN}${SCRIPT_VERSION}${NC}"
+
     if [ ! -f "$INSTALL_FLAG_FILE" ]; then
         install_environment
     else
