@@ -8,29 +8,30 @@ import re
 import shlex
 import psutil
 import time
+import shutil
 
 # --- 1. 基础配置 (用于快速测试) ---
 
 KEYHUNT_PATH = '/workspace/keyhunt/keyhunt'
-# 将输出目录更改为桌面，并使用一个专用文件夹
-OUTPUT_DIR = '/home/desktop/keyhunt_output'
+OUTPUT_DIR = '/home/desktop/keyhunt_output' # 修正：输出到桌面
 
-# 使用您提供的、可以快速找到结果的地址和范围
 BTC_ADDRESS = '1DBaumZxUkM4qMQRt2LVWyFJq5kDtSZQot'
 START_KEY = '0000000000000000000000000000000000000000000000000000000000000800'
 END_KEY =   '0000000000000000000000000000000000000000000000000000000000000fff'
 
-# --- 2. 全局状态、管道与正则表达式 ---
+# --- 2. 全局状态、管道与【修正后】的正则表达式 ---
 
 FOUND_PRIVATE_KEY = None
 key_found_event = threading.Event()
 processes_to_cleanup = []
 
-# 用于进程间通信的命名管道
 PIPE_KH = '/tmp/keyhunt_pipe'
 
-# KeyHunt 找到私钥的正则表达式
-KEYHUNT_PRIV_KEY_RE = re.compile(r'Private key \(hex\):\s*([0-9a-fA-F]{64})')
+# 关键修正：更新正则表达式以匹配两种可能的成功输出
+# 1. Private key (hex): FFFFF...
+# 2. Hit! Private Key: FFFFF...
+# 使用'|'(或)来匹配任意一种格式，并捕获后面的十六进制密钥
+KEYHUNT_PRIV_KEY_RE = re.compile(r'(?:Private key \(hex\)|Hit! Private Key):\s*([0-9a-fA-F]+)')
 
 # --- 3. 系统信息与硬件检测 ---
 
@@ -84,15 +85,11 @@ def run_keyhunt_and_monitor(command, pipe_path):
     if os.path.exists(pipe_path): os.remove(pipe_path)
     os.mkfifo(pipe_path)
 
-    # 构造在新终端中执行的命令
     command_str = ' '.join(shlex.quote(arg) for arg in command)
     terminal_command_str = f"bash -c \"{command_str} | tee {pipe_path}; exec bash\""
 
-    # 启动 xfce4-terminal
     terminal_process = subprocess.Popen([
-        'xfce4-terminal',
-        '--title', '实时监控: KeyHunt (CPU)',
-        '-e', terminal_command_str
+        'xfce4-terminal', '--title', '实时监控: KeyHunt (CPU)', '-e', terminal_command_str
     ])
     processes_to_cleanup.append(terminal_process)
 
@@ -103,8 +100,10 @@ def run_keyhunt_and_monitor(command, pipe_path):
                 if key_found_event.is_set():
                     break
                 
+                # 使用我们修正后的正则表达式进行匹配
                 match = KEYHUNT_PRIV_KEY_RE.search(line)
                 if match:
+                    # 捕获的是第一个括号里的内容，即密钥本身
                     FOUND_PRIVATE_KEY = match.group(1).lower()
                     key_found_event.set() # 发送信号：已找到！
                     break
@@ -124,9 +123,8 @@ def main():
     time.sleep(1)
 
     try:
-        # 安全地创建输出目录，如果已存在则什么也不做
         print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        os.makedirs(OUTPUT_DIR, exist_ok=True) # 修正：安全创建目录
         
         kh_address_file = os.path.join(OUTPUT_DIR, 'target_address.txt')
 
@@ -136,24 +134,25 @@ def main():
 
         with open(kh_address_file, 'w') as f: f.write(BTC_ADDRESS)
         
+        # 关键修正：在命令中加入 '-R' 标志
         keyhunt_command = [
             KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
             '-l', 'both', '-t', str(keyhunt_threads),
+            '-R', # <-- 添加此标志以在指定范围内搜索
             '-r', f'{START_KEY}:{END_KEY}'
         ]
 
-        # 启动 KeyHunt 的监控线程
         thread_kh = threading.Thread(target=run_keyhunt_and_monitor, args=(keyhunt_command, PIPE_KH))
         thread_kh.start()
-
-        # 等待找到密钥的信号
         key_found_event.wait()
         
-        # --- 结果处理 ---
         print("\n" + "="*50)
         if FOUND_PRIVATE_KEY:
+            # 找到的密钥可能不是64位的，我们需要把它补全
+            full_key = FOUND_PRIVATE_KEY.zfill(64)
             print("🎉🎉🎉 测试成功！KeyHunt 找到了密钥！🎉🎉🎉")
-            print(f"\n  私钥 (HEX): {FOUND_PRIVATE_KEY}\n")
+            print(f"\n  捕获值: {FOUND_PRIVATE_KEY}")
+            print(f"  完整私钥 (HEX): {full_key}\n")
             print("所有进程将自动关闭。")
         else:
             print("搜索任务已结束，但未通过监控捕获到密钥。")
@@ -165,5 +164,4 @@ def main():
         print(f"\n[致命错误] 脚本主程序发生错误: {e}")
 
 if __name__ == '__main__':
-    import shutil
     main()
