@@ -6,32 +6,28 @@ import sys
 import atexit
 import re
 import shlex
-import psutil
 import time
-import shutil
 
 # --- 1. 基础配置 (无修改) ---
 
 BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack'
 OUTPUT_DIR = '/tmp/bitcrack_test_output'
-FOUND_FILE_PATH = os.path.join(OUTPUT_DIR, 'found_keys_test.txt') # 将路径定义为常量
+FOUND_FILE_PATH = os.path.join(OUTPUT_DIR, 'found_keys_test.txt')
 
 # 测试用的地址和范围
 BTC_ADDRESS = '19ZewH8Kk1PDbSNdJ97FP4EiCjTRaZMZQA'
 KEYSPACE = '0000000000000000000000000000000000000000000000000000000000000001:000000000000000000000000000000000000000000000000000000000000FFFF'
 
 
-# --- 2. 全局状态、管道与正则表达式 (无修改) ---
+# --- 2. 全局状态、管道与正则表达式 ---
 
 processes_to_cleanup = []
-PIPE_BC = '/tmp/bitcrack_pipe' # 临时管道文件
+PIPE_BC = '/tmp/bitcrack_pipe'
 
-# 正则表达式
-# 【修复】使用 findall 来查找所有匹配项
-FILE_PRIV_KEY_RE = re.compile(r'([0-9a-fA-F]{64})')
+# 正则表达式 (仅用于屏幕实时捕获)
 STDOUT_PRIV_KEY_RE = re.compile(r'Priv:([0-9a-fA-F]{64})')
 
-# --- 3. 系统信息与硬件检测 (无修改，使用您的版本) ---
+# --- 3. 系统信息与硬件检测 ---
 
 def display_system_info():
     """在主控窗口显示简要的系统信息"""
@@ -46,42 +42,32 @@ def display_system_info():
     print("-" * 40)
 
 def get_gpu_params():
-    """尝试自动检测GPU，如果失败则回退到安全的默认值。 (您的版本)"""
+    """【已修复】更健壮地自动检测GPU，如果失败则回退到安全的默认值。"""
     print("INFO: 正在配置 GPU 性能参数...")
     default_params = {'blocks': 288, 'threads': 256, 'points': 1024}
     try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=multiprocessor_count', '--format=csv,noheader'], capture_output=True, text=True, check=True, env=os.environ)
-        sm_count = int(result.stdout.strip())
+        # 这个命令的输出有时不稳定，需要做更严格的检查
+        cmd = ['nvidia-smi', '--query-gpu=multiprocessor_count', '--format=csv,noheader']
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, env=os.environ)
+        sm_count_str = result.stdout.strip()
+
+        # 【核心修复】检查返回的是否为纯数字，防止int()转换失败
+        if not sm_count_str.isdigit():
+            raise ValueError(f"nvidia-smi 返回了非预期的内容: '{sm_count_str}'")
+
+        sm_count = int(sm_count_str)
         blocks, threads, points = sm_count * 7, 256, 1024
         print(f"INFO: 成功检测到 GPU。自动配置: -b {blocks} -t {threads} -p {points}")
         return {'blocks': blocks, 'threads': threads, 'points': points}
-    except Exception:
-        print(f"WARN: 自动检测GPU失败，将使用已知可行的默认参数。")
+    except Exception as e:
+        print(f"WARN: 自动检测GPU失败，将使用已知可行的默认参数。原因: {e}")
         return default_params
 
-# --- 4. 核心执行逻辑与【已修复的监控】 ---
+# --- 4. 核心执行逻辑与最终报告 ---
 
-def final_report_and_cleanup():
-    """【修复】在退出前执行最终报告，然后清理。"""
-    print("\n" + "="*50)
-    print("INFO: 脚本即将退出，正在执行最终密钥报告...")
-    time.sleep(1) # 等待文件系统同步
-
-    found_keys = []
-    if os.path.exists(FOUND_FILE_PATH) and os.path.getsize(FOUND_FILE_PATH) > 0:
-        with open(FOUND_FILE_PATH, 'r') as f:
-            content = f.read()
-            found_keys = FILE_PRIV_KEY_RE.findall(content)
-
-    if found_keys:
-        print(f"🎉🎉🎉 最终报告：在文件 [{FOUND_FILE_PATH}] 中找到 {len(found_keys)} 个密钥！🎉🎉🎉")
-        for i, key in enumerate(found_keys):
-            print(f"  密钥 #{i+1}: {key.lower()}")
-    else:
-        print("最终报告：未在输出文件中找到任何密钥。")
-    print("="*50 + "\n")
-
-    print("[CLEANUP] 正在清理所有子进程和管道...")
+def cleanup():
+    """程序退出时，仅负责清理子进程和管道。"""
+    print("\n[CLEANUP] 正在清理所有子进程和管道...")
     for p in processes_to_cleanup:
         if p.poll() is None:
             try: p.terminate(); p.wait(timeout=2)
@@ -89,24 +75,54 @@ def final_report_and_cleanup():
     if os.path.exists(PIPE_BC): os.remove(PIPE_BC)
     print("[CLEANUP] 清理完成。")
 
-atexit.register(final_report_and_cleanup)
+atexit.register(cleanup)
+
+def generate_final_report():
+    """【已修复】读取文件并按新格式生成最终报告。"""
+    print("="*60)
+    print(f"INFO: 正在读取最终结果文件: {FOUND_FILE_PATH}")
+
+    found_entries = []
+    if os.path.exists(FOUND_FILE_PATH):
+        with open(FOUND_FILE_PATH, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                # 按空格分割每一行
+                parts = line.split()
+                if len(parts) >= 3:
+                    # 至少需要3部分: 地址, 私钥, 公钥
+                    found_entries.append({
+                        'address': parts[0],
+                        'priv_key': parts[1],
+                        'pub_key': parts[2]
+                    })
+
+    if found_entries:
+        print(f"🎉🎉🎉 任务结束！共在文件中找到 {len(found_entries)} 条有效记录！🎉🎉🎉")
+        print("-" * 60)
+        # 格式化输出
+        print(f"{'地址':<36} {'私钥 (HEX)':<66} {'公钥':<66}")
+        print(f"{'-'*36:<36} {'-'*66:<66} {'-'*66:<66}")
+        for entry in found_entries:
+            print(f"{entry['address']:<36} {entry['priv_key'].lower():<66} {entry['pub_key']:<66}")
+    else:
+        print("🔴 任务结束，但在输出文件中未找到任何有效格式的密钥记录。")
+    print("="*60)
 
 def unified_monitor(pipe_path):
-    """【已修复的统一监控】只报告，不停止。"""
-    print("✅ [统一监控] 线程已启动，持续监控屏幕输出...")
+    """持续监控屏幕输出，BitCrack结束后此线程会自动退出。"""
+    print("✅ [统一监控] 线程已启动，等待 BitCrack 进程输出...")
     try:
         with open(pipe_path, 'r') as fifo:
-            # 持续读取管道，直到程序退出
+            # 持续从管道读取，当BitCrack和tee结束后，管道关闭，循环会自动结束
             for line in fifo:
-                match = STDOUT_PRIV_KEY_RE.search(line)
-                if match:
-                    # 找到后只打印实时消息，不设置事件或退出
-                    found_key = match.group(1).lower()
-                    print(f"\n🔔 [实时捕获] 监控到屏幕输出密钥: {found_key} 🔔\n")
-    except Exception as e:
-        # fifo被删除或程序结束时，这里可能会出错，可以安全忽略
+                # 实时打印BitCrack的输出到主控台
+                sys.stdout.write(line)
+                sys.stdout.flush()
+    except Exception:
         pass
-    print("[统一监控] 监控循环结束。")
+    print("\n[统一监控] 检测到 BitCrack 进程已退出。监控线程结束。")
 
 def main():
     """主函数，负责设置和启动任务。"""
@@ -116,23 +132,7 @@ def main():
     try:
         print(f"INFO: 所有输出文件将被保存在: {OUTPUT_DIR}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        # progress_file 用于断点续传，这里保留
         progress_file = os.path.join(OUTPUT_DIR, 'progress.dat')
-
-        # --- 【修复】启动前检查逻辑 ---
-        print("-" * 40)
-        if os.path.exists(FOUND_FILE_PATH) and os.path.getsize(FOUND_FILE_PATH) > 0:
-            with open(FOUND_FILE_PATH, 'r') as f:
-                pre_existing_keys = FILE_PRIV_KEY_RE.findall(f.read())
-            if pre_existing_keys:
-                print(f"⚠️  启动前警告：输出文件 [{FOUND_FILE_PATH}] 中已存在 {len(pre_existing_keys)} 个密钥。")
-                for i, key in enumerate(pre_existing_keys):
-                    print(f"   -> 已有密钥 #{i+1}: {key.lower()}")
-                print("INFO: 脚本将继续执行新的搜索任务。")
-            else:
-                # 文件存在但为空
-                os.remove(FOUND_FILE_PATH)
-        print("-" * 40)
 
         gpu_params = get_gpu_params()
         print("="*40)
@@ -147,29 +147,33 @@ def main():
         if os.path.exists(pipe_path): os.remove(pipe_path)
         os.mkfifo(pipe_path)
 
-        # 保留您原有的新窗口启动方式
         command_str = ' '.join(shlex.quote(arg) for arg in bitcrack_command)
-        terminal_command_str = f"bash -c \"{command_str} | tee {pipe_path}; exec bash\""
+        # 使用 exec bash 确保窗口在任务结束后不会立即关闭，方便查看
+        terminal_command_str = f"bash -c \"{command_str} | tee {pipe_path}; echo '--- BitCrack 已结束，此窗口可关闭 ---'; exec bash\""
         terminal_process = subprocess.Popen(['xfce4-terminal', '--title', '实时监控: BitCrack (GPU)', '-e', terminal_command_str])
         processes_to_cleanup.append(terminal_process)
         print(f"✅ BitCrack 已在新窗口启动...")
 
-        # 启动一个不会自行退出的监控线程
         monitor_thread = threading.Thread(target=unified_monitor, args=(pipe_path,))
-        monitor_thread.daemon = True # 设置为守护线程，主程序退出时它也会退出
         monitor_thread.start()
 
-        print("\nINFO: 监控脚本正在后台运行。您可以观察新开的终端窗口。")
-        print("INFO: 关闭 '实时监控: BitCrack (GPU)' 窗口或在此处按 Ctrl+C 来结束任务并查看最终报告。")
+        # 主线程等待监控线程结束（即BitCrack进程结束）
+        monitor_thread.join()
 
-        # 让主线程在这里永远等待，直到被用户中断 (Ctrl+C)
-        while True:
-            time.sleep(3600)
+        # 【新功能】BitCrack结束后，延迟并生成报告
+        print(f"\nINFO: BitCrack 任务已完成。等待 5 秒后生成最终报告...")
+        time.sleep(5)
+        generate_final_report()
+        print("\nINFO: 脚本执行完毕。")
 
     except KeyboardInterrupt:
-        print("\n[INFO] 检测到用户中断 (Ctrl+C)，准备退出...")
+        print("\n[INFO] 检测到用户中断 (Ctrl+C)，准备退出并生成最终报告...")
+        time.sleep(1)
+        generate_final_report()
     except Exception as e:
         print(f"\n[致命错误] 脚本主程序发生错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main()
