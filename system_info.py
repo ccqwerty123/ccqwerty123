@@ -1,13 +1,15 @@
+#!/usr/bin/env python3
 import subprocess
 import psutil
-import shlex
+import os
 
-def get_gpu_info():
+def get_system_info():
     """
-    通过直接执行 nvidia-smi 命令来获取 GPU 信息 (推荐方式)。
-    我们请求CSV格式的输出以便于解析。
+    获取并简略输出 GPU 和 CPU 的核心信息。
     """
-    print("--- 正在获取 GPU 信息 (推荐方式) ---")
+    print("--- 系统核心信息 ---")
+    
+    # 1. 获取 GPU 信息
     try:
         # 定义要查询的GPU属性
         query_args = [
@@ -15,111 +17,88 @@ def get_gpu_info():
             'name',
             'temperature.gpu',
             'utilization.gpu',
-            'memory.total',
             'memory.used',
-            'memory.free'
+            'memory.total'
         ]
-        # 构建 nvidia-smi 命令
+        # 构建并执行 nvidia-smi 命令
         command = [
             'nvidia-smi',
             f'--query-gpu={",".join(query_args)}',
             '--format=csv,noheader,nounits'
         ]
-        
-        # 执行命令并捕获输出
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         gpu_info_list = result.stdout.strip().split('\n')
         
-        print("成功获取到 GPU 信息:")
-        for i, gpu_info_str in enumerate(gpu_info_list):
+        # 格式化输出
+        for gpu_info_str in gpu_info_list:
+            if not gpu_info_str: continue
             gpu_data = gpu_info_str.split(', ')
-            print(f"\nGPU {gpu_data[0]}:")
-            print(f"  产品名称: {gpu_data[1]}")
-            print(f"  温度: {gpu_data[2]}°C")
-            print(f"  GPU 使用率: {gpu_data[3]} %")
-            print(f"  总显存: {gpu_data[4]} MiB")
-            print(f"  已用显存: {gpu_data[5]} MiB")
-            print(f"  剩余显存: {gpu_data[6]} MiB")
+            print(f"  - GPU {gpu_data[0]}: {gpu_data[1]}, Temp: {gpu_data[2]}°C, Util: {gpu_data[3]}%, Mem: {gpu_data[4]}/{gpu_data[5]} MiB")
 
-    except FileNotFoundError:
-        print("错误: 'nvidia-smi' 命令未找到。请确保 NVIDIA 驱动已正确安装并且 'nvidia-smi' 在您的 PATH 中。")
-    except subprocess.CalledProcessError as e:
-        print(f"执行 nvidia-smi 时出错: {e}")
-        print(f"错误输出:\n{e.stderr}")
-    except Exception as e:
-        print(f"发生未知错误: {e}")
-
-def execute_wget_pipe_simulation():
-    """
-    模拟执行 'wget -qO- | command' 这种管道操作。
-    这是一个处理您特殊需求的示例。在实际情况中，您需要将URL替换为真实的地址。
-    """
-    print("\n--- 模拟执行 'wget -qO- | grep' 管道命令 ---")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        print("  - GPU: 未能获取到 NVIDIA GPU 信息。")
+    
+    # 2. 获取 CPU 信息
     try:
-        # 这是一个示例命令。在真实场景中，URL应该是提供nvidia-smi输出的地址
-        # 我们在这里用 'echo' 来模拟 wget 的输出
-        cmd1 = "echo 'GPU 0: NVIDIA GeForce RTX 3080'"
-        cmd2 = "grep 'RTX'"
-
-        # 使用 shell=True 来执行管道命令
-        # 安全警告: 当使用 shell=True 时，请确保命令内容是可信的，以避免安全风险。
-        pipe_command = f"{cmd1} | {cmd2}"
-        print(f"执行管道命令: {pipe_command}")
-        
-        result = subprocess.run(pipe_command, shell=True, capture_output=True, text=True, check=True)
-        
-        print("管道命令输出:")
-        print(result.stdout.strip())
-        
-    except subprocess.CalledProcessError as e:
-        print(f"执行管道命令时出错: {e}")
-        print(f"错误输出:\n{e.stderr}")
+        cpu_usage = psutil.cpu_percent(interval=0.5)
+        cpu_cores = psutil.cpu_count(logical=False) # 物理核心数
+        cpu_threads = psutil.cpu_count(logical=True) # 逻辑核心数 (线程)
+        print(f"  - CPU: {cpu_cores}核 {cpu_threads}线程, 使用率: {cpu_usage}%")
     except Exception as e:
-        print(f"发生未知错误: {e}")
+        print(f"  - CPU: 未能获取到 CPU 信息: {e}")
 
 
-def find_specific_processes():
+def find_and_terminate_processes():
     """
-    在Linux环境中寻找指定的进程。
+    通过进程名查找并结束指定的进程，不关心其完整路径。
     """
-    print("\n--- 正在寻找指定进程 ---")
+    print("\n--- 正在结束指定进程 ---")
     
-    processes_to_find = {
-        "KeyHunt": "/workspace/keyhunt/keyhunt",
-        "BitCrack": "/workspace/BitCrack/bin/cuBitCrack"
-    }
+    # 需要被结束的进程名列表 (统一使用小写，以便进行不区分大小写的比较)
+    processes_to_kill = ['keyhunt', 'bitcrack', 'cubitcrack']
     
-    found_processes = {name: [] for name in processes_to_find}
+    terminated_count = 0
     
     # 遍历所有正在运行的进程
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+    for proc in psutil.process_iter(['pid', 'name']):
         try:
-            for name, path in processes_to_find.items():
-                # 检查进程的可执行文件路径是否匹配
-                if proc.info['exe'] and proc.info['exe'] == path:
-                    found_processes[name].append({
-                        'pid': proc.info['pid'],
-                        'name': proc.info['name'],
-                        'cmdline': ' '.join(proc.info['cmdline']) if proc.info['cmdline'] else ''
-                    })
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass # 某些进程可能在迭代时已经结束或无法访问
+            # 检查进程名 (转为小写后) 是否在我们的目标列表中
+            proc_name_lower = proc.info['name'].lower()
+            if proc_name_lower in processes_to_kill:
+                pid = proc.info['pid']
+                print(f"  - 发现目标进程: '{proc.info['name']}' (PID: {pid})。正在尝试结束...")
+                
+                # 获取进程对象并结束它
+                p = psutil.Process(pid)
+                p.terminate() # 发送 SIGTERM 信号，请求进程优雅退出
+                
+                # 等待一小段时间，然后检查进程是否真的被终止了
+                gone, alive = psutil.wait_procs([p], timeout=1)
+                if alive:
+                    p.kill() # 如果优雅退出失败，则强制结束 (SIGKILL)
+                    print(f"  - 进程 (PID: {pid}) 未能优雅退出，已强制结束。")
+                else:
+                    print(f"  - 进程 (PID: {pid}) 已成功结束。")
+                
+                terminated_count += 1
+                
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            # 进程可能在我们操作时已经消失，或者我们没有权限
+            pass
+        except Exception as e:
+            print(f"  - 错误: 结束进程时发生意外: {e}")
 
-    # 打印结果
-    for name, procs in found_processes.items():
-        if procs:
-            print(f"\n找到正在运行的 '{name}' 进程:")
-            for p_info in procs:
-                print(f"  - PID: {p_info['pid']}, 名称: {p_info['name']}, 命令行: {p_info['cmdline']}")
-        else:
-            print(f"\n未找到正在运行的 '{name}' 进程 (路径: {processes_to_find[name]})")
+    if terminated_count == 0:
+        print("  - 未找到任何正在运行的 'KeyHunt' 或 'BitCrack' 进程。")
+
 
 if __name__ == "__main__":
-    # 1. 获取并显示 GPU 信息
-    get_gpu_info()
+    # 检查是否以root权限运行
+    if os.geteuid() != 0:
+        print("警告: 脚本未使用root权限运行，可能无法结束所有目标进程。\n")
+
+    # 1. 获取并显示系统信息
+    get_system_info()
     
-    # 2. 演示如何执行管道命令
-    execute_wget_pipe_simulation()
-    
-    # 3. 寻找指定的进程
-    find_specific_processes()
+    # 2. 查找并结束指定进程
+    find_and_terminate_processes()
