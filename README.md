@@ -14,7 +14,7 @@ wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/m
 
 wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3
 执行KeyHunt 和 BitCrack
-
+sudo apt install python3-psutil
 
 bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
 
