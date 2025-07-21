@@ -12,8 +12,10 @@ wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/m
 wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash ; wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash
 混合
 
-wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3
+`wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3`
 执行KeyHunt 和 BitCrack
+
+sudo apt update
 sudo apt install python3-psutil
 
 bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
