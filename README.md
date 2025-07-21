@@ -1,28 +1,28 @@
 ### Hi there 👋
 
 
-wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/cloudstudio.sh | bash
+`wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/cloudstudio.sh | bash`
 
-wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash  复杂版
+`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash`  复杂版
 安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
 
-wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash
+`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash`
 全自动完成 KeyHunt 和 BitCrack 的安装与验证
 
-wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash ; wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash
+`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash ; wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash`
 混合
 
 `wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3`
 执行KeyHunt 和 BitCrack
 
-sudo apt update
-sudo apt install python3-psutil
+`sudo apt update`
+`sudo apt install python3-psutil`
 
-bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)
+`bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)`
 
 服务器优化
 
-bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/x-ui.sh 2> /dev/null)
+`bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/x-ui.sh 2> /dev/null)`
 
 x-ui重启
 <!--
