@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-BTC 自动化挖矿总控制器 (V4 - 智能容错版)
+BTC 自动化挖矿总控制器 (V5 - 健壮硬件检测版)
 
 该脚本整合了 API通信、CPU(KeyHunt)挖矿 和 GPU(BitCrack)挖矿三大功能，实现全自动、高容错的工作流程。
 
 新特性:
+- [V5] 改进了GPU检测逻辑，即使自动参数调整失败，只要检测到GPU存在，就会回退到使用安全的默认参数，而不是禁用GPU。
 - 引入智能错误处理机制，区分“瞬时错误”和“致命错误”。
 - 对任务执行失败引入重试计数器，达到上限或遇到致命错误将自动禁用该计算单元(CPU/GPU)。
 - 对API工作获取失败，采取无限延迟重试策略，以应对网络中断或服务器暂时不可用。
@@ -43,9 +44,9 @@ BITCRACK_PATH = '/workspace/BitCrack/bin/cuBitCrack' # 【配置】cuBitCrack �
 BASE_WORK_DIR = '/tmp/btc_controller_work'
 
 # --- 容错策略配置 ---
-# [V4 新增] 任务执行失败的最大连续重试次数
+# 任务执行失败的最大连续重试次数
 MAX_CONSECUTIVE_ERRORS = 3
-# [V4 新增] API 请求失败或服务器无工作时的重试延迟（秒）
+# API 请求失败或服务器无工作时的重试延迟（秒）
 API_RETRY_DELAY = 60 
 
 # ==============================================================================
@@ -108,7 +109,7 @@ def print_header(title):
 
 def classify_task_error(returncode, stderr_output):
     """
-    [V4 新增] 错误分类器：分析错误输出，判断是瞬时还是致命错误。
+    错误分类器：分析错误输出，判断是瞬时还是致命错误。
     """
     stderr_lower = stderr_output.lower()
     
@@ -136,12 +137,12 @@ def classify_task_error(returncode, stderr_output):
 
 
 # ==============================================================================
-# --- 4. API 通信模块 (V4 修改) ---
+# --- 4. API 通信模块 ---
 # ==============================================================================
 
 def get_work_with_retry(session, client_id):
     """
-    [V4 修改] 请求新工作。如果失败（网络/服务器问题），将无限期延迟重试。
+    请求新工作。如果失败（网络/服务器问题），将无限期延迟重试。
     """
     print(f"\n[*] 客户端 '{client_id}' 正在向服务器请求新的工作...")
     while True: # 无限重试循环，直到成功
@@ -190,33 +191,60 @@ def submit_result(session, address, found, private_key=None):
         return False
 
 # ==============================================================================
-# --- 5. 硬件检测与挖矿任务执行模块 (V4 修改) ---
+# --- 5. 硬件检测与挖矿任务执行模块 (V5 修改) ---
 # ==============================================================================
 
 def detect_hardware():
-    """统一硬件检测函数。返回包含has_gpu和cpu_threads信息的字典。"""
+    """
+    [V5 修改] 统一硬件检测函数。
+    首先尝试自动调优，如果失败则回退到基本检测和默认参数。
+    """
     print_header("硬件自检")
     hardware_config = {'has_gpu': False, 'gpu_params': None, 'cpu_threads': 1}
-    
+    default_gpu_params = {'blocks': 288, 'threads': 256, 'points': 1024}
+
+    # --- GPU 检测与调优 ---
     try:
-        cmd = ['nvidia-smi', '--query-gpu=name,multiprocessor_count', '--format=csv,noheader,nounits']
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        # 步骤 1: 尝试获取所有信息以进行自动调优
+        cmd_tune = ['nvidia-smi', '--query-gpu=name,multiprocessor_count', '--format=csv,noheader,nounits']
+        result = subprocess.run(cmd_tune, capture_output=True, text=True, check=True, timeout=5)
         gpu_name, sm_count_str = result.stdout.strip().split(', ')
-        if not sm_count_str.isdigit(): raise ValueError(f"非预期的 SM Count: '{sm_count_str}'")
+
+        if not sm_count_str.isdigit():
+            raise ValueError(f"从 nvidia-smi 获得的 SM Count 不是有效数字: '{sm_count_str}'")
+        
         sm_count = int(sm_count_str)
         blocks, threads, points = sm_count * 7, 256, 1024
         
         hardware_config['has_gpu'] = True
         hardware_config['gpu_params'] = {'blocks': blocks, 'threads': threads, 'points': points}
-        print(f"✅ 检测到 GPU: {gpu_name} (SM: {sm_count}) -> GPU 任务将启用。")
-    except Exception as e:
-        print(f"⚠️ 未检测到有效NVIDIA GPU (原因: {e}) -> 将只使用 CPU。")
+        print(f"✅ GPU: {gpu_name} (SM: {sm_count}) -> 检测成功，已自动配置性能参数。")
 
+    except Exception as e_tune:
+        # 步骤 2: 如果调优失败，尝试进行基本检测
+        print(f"⚠️ 自动GPU参数调优失败 (原因: {e_tune})。")
+        print("   正在尝试基本GPU检测...")
+        try:
+            cmd_basic = ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader,nounits']
+            result_basic = subprocess.run(cmd_basic, capture_output=True, text=True, check=True, timeout=5)
+            gpu_name_basic = result_basic.stdout.strip()
+            
+            hardware_config['has_gpu'] = True
+            hardware_config['gpu_params'] = default_gpu_params
+            print(f"✅ GPU: {gpu_name_basic} -> 基本检测成功。GPU任务将使用默认性能参数。")
+
+        except Exception as e_detect:
+            # 步骤 3: 如果基本检测也失败，则确认无可用GPU
+            print(f"❌ 最终确认：未检测到有效NVIDIA GPU (原因: {e_detect}) -> 将只使用 CPU。")
+            hardware_config['has_gpu'] = False
+
+    # --- CPU 检测 ---
     try:
         cpu_cores = os.cpu_count()
+        # 如果有GPU，让CPU全力以赴；如果没有GPU，保留一个核心给系统
         threads = cpu_cores if hardware_config['has_gpu'] else max(1, cpu_cores - 1 if cpu_cores > 1 else 1)
         hardware_config['cpu_threads'] = threads
-        print(f"✅ 检测到 CPU: {cpu_cores} 核心 -> CPU 任务将使用 {threads} 个线程。")
+        print(f"✅ CPU: {cpu_cores} 核心 -> CPU 任务将使用 {threads} 个线程。")
     except Exception as e:
         hardware_config['cpu_threads'] = 15 # fallback
         print(f"⚠️ CPU核心检测失败 (原因: {e}) -> CPU 任务将使用默认 {hardware_config['cpu_threads']} 个线程。")
@@ -226,7 +254,7 @@ def detect_hardware():
 
 def run_cpu_task(work_unit, num_threads, result_container):
     """
-    [V4 修改] 执行KeyHunt，并返回详细的错误信息用于分类。
+    执行KeyHunt，并返回详细的错误信息用于分类。
     """
     address, start_key, end_key = work_unit['address'], work_unit['range']['start'], work_unit['range']['end']
     print(f"[CPU-WORKER] 开始处理地址: {address[:12]}...")
@@ -296,7 +324,7 @@ def run_cpu_task(work_unit, num_threads, result_container):
 
 def run_gpu_task(work_unit, gpu_params, result_container):
     """
-    [V4 修改] 执行BitCrack，失败后读取日志文件内容进行错误分类。
+    执行BitCrack，失败后读取日志文件内容进行错误分类。
     """
     address, keyspace = work_unit['address'], f"{work_unit['range']['start']}:{work_unit['range']['end']}"
     print(f"[GPU-WORKER] 开始处理地址: {address[:12]}...")
@@ -321,7 +349,7 @@ def run_gpu_task(work_unit, gpu_params, result_container):
             process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
             process_info = {'process': process, 'name': 'BitCrack'}
             processes_to_cleanup.append(process_info)
-            print(f"[GPU-WORKER] BitCrack (PID: {process.pid}) 已启动。日志: tail -f {log_file_path}")
+            print(f"[GPU-WORKER] BitCrack (PID: {process.pid}) 已启动。日志提示: tail -f {shlex.quote(log_file_path)}")
             returncode = process.wait()
 
         print(f"\n[GPU-WORKER] BitCrack 进程 (PID: {process.pid}) 已退出，返回码: {returncode}")
@@ -359,20 +387,20 @@ def run_gpu_task(work_unit, gpu_params, result_container):
         result_container['result'] = final_result
 
 # ==============================================================================
-# --- 6. 主控制器逻辑 (V4 - 智能容错) ---
+# --- 6. 主控制器逻辑 (智能容错) ---
 # ==============================================================================
 
 def main():
     """主控制器函数，作为并行任务调度器，并包含智能容错逻辑。"""
     client_id = f"btc-controller-{uuid.uuid4().hex[:8]}"
-    print(f"控制器启动 (V4 智能容错版)，客户端 ID: {client_id}")
+    print(f"控制器启动 (V5 健壮硬件检测版)，客户端 ID: {client_id}")
     os.makedirs(BASE_WORK_DIR, exist_ok=True)
     
     hardware = detect_hardware()
     session = requests.Session()
     session.headers.update(BROWSER_HEADERS)
 
-    # [V4 新增] 为每个计算单元创建状态机
+    # 为每个计算单元创建状态机
     task_slots = {}
     if hardware['has_gpu']:
         task_slots['GPU'] = {'thread': None, 'work': None, 'result_container': None, 'enabled': True, 'consecutive_errors': 0}
@@ -444,7 +472,6 @@ if __name__ == '__main__':
         print(f"!! 启动错误: KeyHunt 程序未找到或不可执行，路径: '{KEYHUNT_PATH}' !!")
         sys.exit(1)
     
-    # 只有在硬件检测需要时才检查BitCrack路径
     try:
         # 简单运行 nvidia-smi 判断是否有GPU，避免在无GPU机器上强行要求BitCrack
         subprocess.run(['nvidia-smi'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
