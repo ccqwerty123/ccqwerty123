@@ -2,97 +2,148 @@
 # -*- coding: utf-8 -*-
 
 import subprocess
-import re
 import shlex
+import argparse
+from typing import Dict, List
 
-def query_gpu():
+def display_system_info():
+    """在主控窗口显示简要的系统信息"""
+    print("--- 系统状态 (BitCrack 最终修复版) ---")
+    try:
+        cmd = [
+            'nvidia-smi',
+            '--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total',
+            '--format=csv,noheader,nounits'
+        ]
+        gpu_info = subprocess.check_output(cmd, text=True).strip()
+        # 假设只显示第一块 GPU
+        name, temp, util, used, total = map(str.strip, gpu_info.split(',')[0:5])
+        print(
+            f"✅ GPU: {name} | Temp: {temp}°C | Util: {util}% | "
+            f"Mem: {used}/{total} MiB"
+        )
+    except Exception:
+        print("⚠️ GPU: 未检测到 NVIDIA GPU 或 nvidia-smi 不可用。")
+    print("-" * 40)
+
+def query_all_gpus() -> List[Dict[str, int]]:
     """
-    返回一个 dict，包括
-      - sm_count    : multiprocessor_count
-      - temp        : temperature.gpu (°C)
-      - util        : utilization.gpu (%)
-      - mem_used    : memory.used (MiB)
-      - mem_total   : memory.total (MiB)
+    返回所有 GPU 的指标列表，每个元素为 dict：
+      - index, sm_count, temp, util, mem_used, mem_total
+    抛出 RuntimeError 表示查询失败。
     """
     cmd = [
         "nvidia-smi",
-        "--query-gpu=multiprocessor_count,temperature.gpu,utilization.gpu,memory.used,memory.total",
+        "--query-gpu=index,multiprocessor_count,temperature.gpu,utilization.gpu,"
+        "memory.used,memory.total",
         "--format=csv,noheader,nounits"
     ]
-    out = subprocess.check_output(cmd, text=True).strip()
-    # 例如 out = "16, 65, 10, 2048, 8192"
-    parts = [p.strip() for p in out.split(",")]
-    sm_count, temp, util, mem_used, mem_total = map(int, parts)
-    return {
-        "sm_count": sm_count,
-        "temp":     temp,
-        "util":     util,
-        "mem_used": mem_used,
-        "mem_total": mem_total
-    }
+    try:
+        out = subprocess.check_output(cmd, text=True).strip().splitlines()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"nvidia-smi 调用失败: {e}") from e
 
-def choose_params(info):
+    gpus = []
+    for line in out:
+        idx, sm, temp, util, mu, mt = map(int, map(str.strip, line.split(",")))
+        gpus.append({
+            "index": idx,
+            "sm_count": sm,
+            "temp": temp,
+            "util": util,
+            "mem_used": mu,
+            "mem_total": mt
+        })
+    return gpus
+
+def choose_params(
+    info: Dict[str, int],
+    mem_thresh: int = 10000,
+    temp_thresh: int = 80,
+    util_thresh: int = 80,
+    base_factor: int = 7,
+    safe_factor: int = 5
+) -> Dict[str, int]:
     """
-    根据 info 来选择 -b, -t, -p 参数。
-    这里仅给出一个示例策略，你可以自由修改。
+    根据单块 GPU 指标选取 blocks/threads/points。
+    返回字典：{"blocks":…, "threads":…, "points":…}
     """
-    sm = info["sm_count"]
     free_mem = info["mem_total"] - info["mem_used"]
+    threads = 512 if free_mem >= mem_thresh else 256
+    factor = safe_factor if (info["temp"] > temp_thresh or info["util"] > util_thresh) else base_factor
+    blocks = info["sm_count"] * factor
+    # 假设 1 point 占 1 MiB，用一半 free_mem，再限制范围
+    raw_points = free_mem // 2
+    points = max(256, min(raw_points, 4096))
+    return {"blocks": blocks, "threads": threads, "points": points}
 
-    # 基础 thread 数通常是 128/256/512，看显存和 SM 数来选
-    if free_mem >= 10000:
-        threads = 512
-    else:
-        threads = 256
-
-    # blocks 用 SM 数 * factor
-    # 如果 GPU 温度过高或利用率已高，就用保守点的 factor
-    if info["temp"] > 80 or info["util"] > 80:
-        factor = 5
-    else:
-        factor = 7
-    blocks = sm * factor
-
-    # points 数量取决于可用显存：
-    # 假设每 point 占用 1KB，我们给它 50% 的 free_mem
-    # （这里只是举例）
-    points = int((free_mem * 1024 // 2) / 1024)  # MiB -> KB, 然后 /1KB
-    # 再确保在一个合理区间
-    points = max(256, min(points, 4096))
-
-    return blocks, threads, points
-
-def build_command(blocks, threads, points):
+def build_command(
+    params: Dict[str, int],
+    executable: str,
+    keyspace: str,
+    password: str,
+    output: str,
+    cont: str
+) -> str:
     """
-    拼接最后要输出的 cuBitCrack 命令行。
+    用 shlex.join 拼接安全的命令行字符串
     """
-    base = "/workspace/BitCrack/bin/cuBitCrack"
-    keyspace = ("0000000000000000000000000000000000000000000000599999aabcacda0001:"
-                "00000000000000000000000000000000000000000000005e666674ae4bc6aaab")
-    password = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
-    out_file = "/workspace/BitCrack/found_keys_server2.txt"
-    cont_file = "/workspace/BitCrack/progress_server2.txt"
-
-    cmd = (
-        f"{base} "
-        f"-b {blocks} -t {threads} -p {points} "
-        f"--keyspace {keyspace} {password} "
-        f"-o {out_file} "
-        f"--continue {cont_file}"
-    )
-    return cmd
+    cmd_list = [
+        executable,
+        "-b", str(params["blocks"]),
+        "-t", str(params["threads"]),
+        "-p", str(params["points"]),
+        "--keyspace", keyspace,
+        password,
+        "-o", output,
+        "--continue", cont
+    ]
+    return shlex.join(cmd_list)
 
 def main():
-    try:
-        info = query_gpu()
-    except Exception as e:
-        print("⚠️ 读取 GPU 信息失败，使用默认参数。", e)
-        blocks, threads, points = 288, 256, 1024
-    else:
-        blocks, threads, points = choose_params(info)
+    # 先打印系统（GPU）状态
+    display_system_info()
 
-    cmd = build_command(blocks, threads, points)
-    # 最终只 print，不执行
+    parser = argparse.ArgumentParser(description="自动生成 cuBitCrack 命令行")
+    parser.add_argument(
+        "--exe",
+        default="/workspace/BitCrack/bin/cuBitCrack",
+        help="cuBitCrack 可执行文件路径"
+    )
+    parser.add_argument("--keyspace", required=True, help="指定 keyspace 范围")
+    parser.add_argument("--password", required=True, help="指定已知的 password")
+    parser.add_argument(
+        "--out",
+        default="./found_keys.txt",
+        help="破解到的 key 输出文件"
+    )
+    parser.add_argument(
+        "--cont",
+        default="./progress.txt",
+        help="进度记录文件"
+    )
+    args = parser.parse_args()
+
+    # 尝试查询所有 GPU
+    try:
+        gpus = query_all_gpus()
+    except RuntimeError as e:
+        print("⚠️ 获取 GPU 信息失败，使用默认参数:", e)
+        # 默认值：blocks=288, threads=256, points=1024
+        params = {"blocks": 288, "threads": 256, "points": 1024}
+    else:
+        # 这里只选第 0 块 GPU，也可以根据 index 选择或遍历
+        params = choose_params(gpus[0])
+
+    cmd = build_command(
+        params,
+        executable=args.exe,
+        keyspace=args.keyspace,
+        password=args.password,
+        output=args.out,
+        cont=args.cont
+    )
+
     print("生成的 cuBitCrack 命令：")
     print(cmd)
 
