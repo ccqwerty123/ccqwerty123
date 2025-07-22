@@ -2,16 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-BTC 自动化挖矿总控制器 (V5 - 健壮硬件检测版)
+BTC 自动化挖矿总控制器 (V6 - 智能显存管理版)
 
 该脚本整合了 API通信、CPU(KeyHunt)挖矿 和 GPU(BitCrack)挖矿三大功能，实现全自动、高容错的工作流程。
 
 新特性:
+- [V6] 增加主动式显存清理机制，在每次启动GPU任务前，强制终止残留的BitCrack进程，防止显存泄漏。
+- [V6] 增加详细的GPU任务诊断日志，清晰展示从API接收的10进制范围到程序使用的16进制范围的转换过程和最终执行的命令。
 - [V5] 改进了GPU检测逻辑，即使自动参数调整失败，只要检测到GPU存在，就会回退到使用安全的默认参数，而不是禁用GPU。
 - 引入智能错误处理机制，区分“瞬时错误”和“致命错误”。
 - 对任务执行失败引入重试计数器，达到上限或遇到致命错误将自动禁用该计算单元(CPU/GPU)。
 - 对API工作获取失败，采取无限延迟重试策略，以应对网络中断或服务器暂时不可用。
-- 增加详细的日志，清晰展示控制器的决策过程，便于监控和诊断。
 - 完全并行：在有兼容GPU的系统上，CPU和GPU将同时处理不同的工作单元，最大化效率。
 """
 
@@ -152,7 +153,7 @@ def get_work_with_retry(session, client_id):
             if response.status_code == 200:
                 work_data = response.json()
                 if work_data.get('address') and work_data.get('range'):
-                    print(f"[+] 成功获取工作! 地址: {work_data['address']}, 范围: {work_data['range']['start']} - {work_data['range']['end']}")
+                    print(f"[+] 成功获取工作! 地址: {work_data['address']}, 范围 (10进制): {work_data['range']['start']} - {work_data['range']['end']}")
                     return work_data
                 else:
                     print(f"[!] 获取工作成功(200)，但响应格式不正确: {response.text}。将在 {API_RETRY_DELAY} 秒后重试...")
@@ -191,7 +192,7 @@ def submit_result(session, address, found, private_key=None):
         return False
 
 # ==============================================================================
-# --- 5. 硬件检测与挖矿任务执行模块 (V5 修改) ---
+# --- 5. 硬件检测与挖矿任务执行模块 (V6 修改) ---
 # ==============================================================================
 
 def detect_hardware():
@@ -251,6 +252,27 @@ def detect_hardware():
         
     return hardware_config
 
+def force_cleanup_gpu_processes():
+    """
+    [V6 新增] 主动查找并终止任何残留的 BitCrack 进程以释放显存。
+    """
+    print_header("主动式 GPU 进程清理")
+    bitcrack_exe_name = os.path.basename(BITCRACK_PATH)
+    killed_any = False
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if proc.info['name'] == bitcrack_exe_name:
+                print(f"  -> 发现残留的 BitCrack 进程 (PID: {proc.info['pid']})。正在强制终止...")
+                proc.kill()
+                killed_any = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue # 进程可能在我们处理它之前就消失了
+
+    if killed_any:
+        print("  -> 清理完成。暂停2秒以待系统资源释放。")
+        time.sleep(2)
+    else:
+        print("  -> 未发现残留的 BitCrack 进程。")
 
 def run_cpu_task(work_unit, num_threads, result_container):
     """
@@ -264,6 +286,7 @@ def run_cpu_task(work_unit, num_threads, result_container):
     kh_address_file = os.path.join(task_work_dir, 'target_address.txt')
     with open(kh_address_file, 'w') as f: f.write(address)
 
+    # KeyHunt直接使用服务器提供的范围，通常是十六进制
     command = [
         KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
         '-l', 'both', '-t', str(num_threads), '-R', '-r', f'{start_key}:{end_key}'
@@ -284,6 +307,8 @@ def run_cpu_task(work_unit, num_threads, result_container):
         process_info = {'process': process, 'name': 'KeyHunt'}
         processes_to_cleanup.append(process_info)
         print(f"[CPU-WORKER] KeyHunt (PID: {process.pid}) 已启动...")
+        print(f"[CPU-WORKER] 执行命令: {' '.join(shlex.quote(c) for c in command)}")
+
 
         for line in iter(process.stdout.readline, ''):
             if process.poll() is not None: break
@@ -324,10 +349,34 @@ def run_cpu_task(work_unit, num_threads, result_container):
 
 def run_gpu_task(work_unit, gpu_params, result_container):
     """
-    执行BitCrack，失败后读取日志文件内容进行错误分类。
+    [V6 修改] 执行BitCrack，增加显存清理、范围转换和诊断日志。
     """
-    address, keyspace = work_unit['address'], f"{work_unit['range']['start']}:{work_unit['range']['end']}"
+    address = work_unit['address']
+    
+    # --- V6 新增: 显存清理 ---
+    force_cleanup_gpu_processes()
+    
     print(f"[GPU-WORKER] 开始处理地址: {address[:12]}...")
+
+    # --- V6 新增: 范围转换与诊断 ---
+    try:
+        start_dec = int(work_unit['range']['start'])
+        end_dec = int(work_unit['range']['end'])
+        
+        start_hex = hex(start_dec)[2:] # hex()返回 '0x...'，我们去掉前缀
+        end_hex = hex(end_dec)[2:]
+        
+        keyspace = f"{start_hex}:{end_hex}"
+
+        print(f"[GPU-WORKER-DIAG] API 10进制范围: {start_dec} - {end_dec}")
+        print(f"[GPU-WORKER-DIAG] 转换后16进制范围: {start_hex} - {end_hex}")
+
+    except (ValueError, TypeError) as e:
+        # 如果范围无法转换为整数，则任务失败
+        final_result = {'error': True, 'error_type': 'TRANSIENT', 'error_message': f"API返回的范围无效，无法转换为数字: {e}"}
+        result_container['result'] = final_result
+        print(f"⚠️ [GPU-WORKER] 任务中止，原因: {final_result['error_message']}")
+        return
 
     task_work_dir = os.path.join(BASE_WORK_DIR, f"bc_{address[:10]}_{uuid.uuid4().hex[:6]}")
     os.makedirs(task_work_dir, exist_ok=True)
@@ -345,6 +394,10 @@ def run_gpu_task(work_unit, gpu_params, result_container):
     final_result = {'found': False, 'error': False, 'error_type': None, 'error_message': ''}
     
     try:
+        # --- V6 新增: 打印最终命令 ---
+        print(f"[GPU-WORKER-DIAG] 将要执行的命令:")
+        print(f"  {' '.join(shlex.quote(c) for c in command)}")
+
         with open(log_file_path, 'w') as log_file:
             process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
             process_info = {'process': process, 'name': 'BitCrack'}
@@ -386,6 +439,7 @@ def run_gpu_task(work_unit, gpu_params, result_container):
         print(f"[GPU-WORKER] 任务清理完成。工作目录保留于: {task_work_dir}")
         result_container['result'] = final_result
 
+
 # ==============================================================================
 # --- 6. 主控制器逻辑 (智能容错) ---
 # ==============================================================================
@@ -393,7 +447,7 @@ def run_gpu_task(work_unit, gpu_params, result_container):
 def main():
     """主控制器函数，作为并行任务调度器，并包含智能容错逻辑。"""
     client_id = f"btc-controller-{uuid.uuid4().hex[:8]}"
-    print(f"控制器启动 (V5 健壮硬件检测版)，客户端 ID: {client_id}")
+    print(f"控制器启动 (V6 智能显存管理版)，客户端 ID: {client_id}")
     os.makedirs(BASE_WORK_DIR, exist_ok=True)
     
     hardware = detect_hardware()
