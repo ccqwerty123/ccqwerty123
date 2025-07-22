@@ -281,7 +281,8 @@ def run_cpu_task(work_unit, num_threads, result_container):
 
     command = [
         KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
-        '-l', 'both', '-t', str(num_threads), '-R', '-r', f'{start_key_hex}:{end_key_hex}' # <-- [V6] 使用16进制范围
+        '-l', 'compress', '-t', str(num_threads), # 删除了 '-R' 参数
+        '-r', f'{start_key_hex}:{end_key_hex}' 
     ]
     
     # --- [V6] 打印完整命令 ---
