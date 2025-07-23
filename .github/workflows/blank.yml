@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build for Linux (x64) on Ubuntu 22.04 (for compatibility with 24.04)
-    runs-on: ubuntu-latest # This is currently Ubuntu 22.04
+    runs-on: ubuntu-latest
 
     # 定义环境变量
     env:
@@ -78,35 +78,44 @@ jobs:
         }
         EOF
         echo "✅ config.json created with your wallet address."
-
-    - name: 5. 执行静态编译
-      working-directory: ${{ env.DIR_NAME }}
+        
+    - name: 5. 【诊断步骤】显示文件结构和权限
       run: |
-        echo "📦 Granting execute permission to the dependency builder script..."
-        # 关键修正：在运行前为脚本添加执行权限
-        chmod +x ./scripts/build_deps.sh
+        echo "🔍 Displaying file structure and permissions for debugging..."
+        ls -lR ${{ env.DIR_NAME }}
+
+    - name: 6. 构建静态依赖库
+      # 关键修正：将工作目录切换到 scripts 内部
+      working-directory: ${{ env.DIR_NAME }}/scripts
+      run: |
+        echo "📦 Changing directory to $(pwd)"
+        echo "📦 Granting execute permission to all shell scripts in this directory..."
+        # 关键修正：为所有可能被调用的脚本添加执行权限
+        chmod +x ./*.sh
         
         echo "📦 Running the dependency builder script..."
-        ./scripts/build_deps.sh
+        # 关键修正：现在在正确的目录下执行脚本
+        ./build_deps.sh
 
+    - name: 7. 编译主程序
+      working-directory: ${{ env.DIR_NAME }}
+      run: |
         echo "🚀 Compiling the main program with static links..."
         mkdir build && cd build
         cmake .. -DXMRIG_DEPS=scripts/deps -DCMAKE_BUILD_TYPE=Release
         make -j$(nproc)
 
-    - name: 6. 准备最终打包目录
+    - name: 8. 准备并打包最终文件
       run: |
         mkdir -p final-package
         mv ${{ env.DIR_NAME }}/build/xmrig final-package/${{ env.EXE_NAME }}
         mv ${{ env.DIR_NAME }}/src/config.json final-package/config.json
         echo "✅ Final package directory prepared."
-
-    - name: 7. 创建 .tar.gz 压缩包
-      run: |
+        
         tar -czvf ${{ env.PACKAGE_NAME }}.tar.gz -C final-package/ .
         echo "✅ Created ${{ env.PACKAGE_NAME }}.tar.gz"
 
-    - name: 8. 上传产物包
+    - name: 9. 上传产物包
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.PACKAGE_NAME }}
