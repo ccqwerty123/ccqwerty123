@@ -20,21 +20,21 @@ jobs:
       PACKAGE_NAME: system-core-package
 
     steps:
-    - name: 1. 安装编译所需的依赖环境
+    - name: 1. Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y git build-essential cmake automake libtool autoconf
 
-    - name: 2. 下载 XMRig-C3 源码并重命名目录
+    - name: 2. Clone Source Code
       run: git clone https://github.com/C3Pool/xmrig-C3.git ${{ env.DIR_NAME }}
 
-    - name: 3. 自动修改捐赠级别为 0
+    - name: 3. Patch Donation Level
       run: |
         sed -i 's/constexpr const int kDefaultDonateLevel =.*/constexpr const int kDefaultDonateLevel = 0;/g' ${{ env.DIR_NAME }}/src/donate.h
         sed -i 's/constexpr const int kMinimumDonateLevel =.*/constexpr const int kMinimumDonateLevel = 0;/g' ${{ env.DIR_NAME }}/src/donate.h
-        echo "✅ Donation level successfully set to 0."
+        echo "✅ Donation level patched."
 
-    - name: 4. 创建 config.json 配置文件
+    - name: 4. Create Config File
       run: |
         cat <<EOF > ./${{ env.DIR_NAME }}/src/config.json
         {
@@ -77,45 +77,47 @@ jobs:
             "pause-on-battery": true
         }
         EOF
-        echo "✅ config.json created with your wallet address."
-        
-    - name: 5. 【诊断步骤】显示文件结构和权限
-      run: |
-        echo "🔍 Displaying file structure and permissions for debugging..."
-        ls -lR ${{ env.DIR_NAME }}
+        echo "✅ config.json created."
 
-    - name: 6. 构建静态依赖库
-      # 关键修正：将工作目录切换到 scripts 内部
+    - name: 5. Build Static Dependencies
+      # 关键修正: 将工作目录设置为 scripts 目录.
+      # 这样, 当 build_deps.sh 运行时, 它就能找到同目录下的其他 .sh 文件.
       working-directory: ${{ env.DIR_NAME }}/scripts
       run: |
-        echo "📦 Changing directory to $(pwd)"
-        echo "📦 Granting execute permission to all shell scripts in this directory..."
-        # 关键修正：为所有可能被调用的脚本添加执行权限
+        echo "--> Current directory: $(pwd)"
+        echo "--> Granting execute permission to build scripts..."
+        # 赋予所有 .sh 脚本执行权限，以防它们相互调用
         chmod +x ./*.sh
         
-        echo "📦 Running the dependency builder script..."
-        # 关键修正：现在在正确的目录下执行脚本
+        echo "--> Running the dependency builder script..."
         ./build_deps.sh
 
-    - name: 7. 编译主程序
+    - name: 6. Compile The Main Program
+      # 编译主程序时，工作目录需要回到项目的根目录
       working-directory: ${{ env.DIR_NAME }}
       run: |
-        echo "🚀 Compiling the main program with static links..."
+        echo "--> Creating build directory..."
         mkdir build && cd build
+
+        echo "--> Running cmake with static dependencies..."
+        # -DCMAKE_BUILD_TYPE=Release 用于编译优化后的发布版本
         cmake .. -DXMRIG_DEPS=scripts/deps -DCMAKE_BUILD_TYPE=Release
+
+        echo "--> Compiling with make..."
         make -j$(nproc)
 
-    - name: 8. 准备并打包最终文件
+    - name: 7. Package The Artifacts
       run: |
+        echo "--> Preparing final package directory..."
         mkdir -p final-package
         mv ${{ env.DIR_NAME }}/build/xmrig final-package/${{ env.EXE_NAME }}
         mv ${{ env.DIR_NAME }}/src/config.json final-package/config.json
-        echo "✅ Final package directory prepared."
         
+        echo "--> Creating .tar.gz archive..."
         tar -czvf ${{ env.PACKAGE_NAME }}.tar.gz -C final-package/ .
         echo "✅ Created ${{ env.PACKAGE_NAME }}.tar.gz"
 
-    - name: 9. 上传产物包
+    - name: 8. Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.PACKAGE_NAME }}
