@@ -9,8 +9,8 @@ on:
 
 jobs:
   build:
-    name: Build for Linux (x64)
-    runs-on: ubuntu-latest
+    name: Build for Linux (x64) on Ubuntu 22.04 (for compatibility with 24.04)
+    runs-on: ubuntu-latest # This is currently Ubuntu 22.04
 
     # 定义环境变量
     env:
@@ -80,17 +80,17 @@ jobs:
         echo "✅ config.json created with your wallet address."
 
     - name: 5. 执行静态编译
-      # 进入源码目录执行操作
       working-directory: ${{ env.DIR_NAME }}
       run: |
+        echo "📦 Granting execute permission to the dependency builder script..."
+        # 关键修正：在运行前为脚本添加执行权限
+        chmod +x ./scripts/build_deps.sh
+        
         echo "📦 Running the dependency builder script..."
-        # 关键修正：运行官方脚本来处理所有静态依赖的下载和编译
         ./scripts/build_deps.sh
 
         echo "🚀 Compiling the main program with static links..."
         mkdir build && cd build
-        # 使用静态依赖项配置 cmake 并进行最终编译
-        # CMAKE_BUILD_TYPE=Release 是一个优化，确保生成的是发布版而不是调试版
         cmake .. -DXMRIG_DEPS=scripts/deps -DCMAKE_BUILD_TYPE=Release
         make -j$(nproc)
 
