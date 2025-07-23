@@ -268,7 +268,7 @@ def run_cpu_task(work_unit, num_threads, result_container):
         start_key_hex = hex(start_key_int)[2:]
         end_key_hex = hex(end_key_int)[2:]
         print(f"  -> API 范围 (10进制): {start_key_dec} - {end_key_dec}")
-        print(f"  -> 程序范围 (16进制): {start_key_hex} - {end_key_hex}")
+        #print(f"  -> 程序范围 (16进制): {start_key_hex} - {end_key_hex}")
     except (ValueError, TypeError):
         msg = f"API返回的范围值无效: start={start_key_dec}, end={end_key_dec}"
         print(f"⚠️ [CPU-WORKER] {msg}")
@@ -286,7 +286,7 @@ def run_cpu_task(work_unit, num_threads, result_container):
         # 2. 计算 -n 参数值 (向上取整到1024的倍数)
         n_value = (keys_to_search + 1023) // 1024 * 1024
         n_value_hex = hex(n_value)
-        print(f"  -> 范围总数: {keys_to_search} | 计算出的 -n 参数: {n_value} ({n_value_hex})")
+        #print(f"  -> 范围总数: {keys_to_search} | 计算出的 -n 参数: {n_value} ({n_value_hex})")
 
     except ValueError as e:
         msg = f"计算-n参数时出错: {e}"
@@ -331,8 +331,8 @@ def run_cpu_task(work_unit, num_threads, result_container):
             if process.poll() is not None: break
             clean_line = line.strip()
             # 简化状态输出，避免因实时捕获密钥而产生的格式混乱
-            if 'keys/s' in clean_line:
-                 sys.stdout.write(f"\r  [CPU Status] {clean_line}"); sys.stdout.flush()
+            #if 'keys/s' in clean_line:
+                 #sys.stdout.write(f"\r  [CPU Status] {clean_line}"); sys.stdout.flush()
             
             match = KEYHUNT_PRIV_KEY_RE.search(line)
             if match:
