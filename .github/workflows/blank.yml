@@ -80,30 +80,16 @@ jobs:
         echo "✅ config.json created."
 
     - name: 5. Build Static Dependencies
-      # 关键修正: 将工作目录设置为 scripts 目录.
-      # 这样, 当 build_deps.sh 运行时, 它就能找到同目录下的其他 .sh 文件.
       working-directory: ${{ env.DIR_NAME }}/scripts
       run: |
-        echo "--> Current directory: $(pwd)"
-        echo "--> Granting execute permission to build scripts..."
-        # 赋予所有 .sh 脚本执行权限，以防它们相互调用
         chmod +x ./*.sh
-        
-        echo "--> Running the dependency builder script..."
         ./build_deps.sh
 
     - name: 6. Compile The Main Program
-      # 编译主程序时，工作目录需要回到项目的根目录
       working-directory: ${{ env.DIR_NAME }}
       run: |
-        echo "--> Creating build directory..."
         mkdir build && cd build
-
-        echo "--> Running cmake with static dependencies..."
-        # -DCMAKE_BUILD_TYPE=Release 用于编译优化后的发布版本
         cmake .. -DXMRIG_DEPS=scripts/deps -DCMAKE_BUILD_TYPE=Release
-
-        echo "--> Compiling with make..."
         make -j$(nproc)
 
     - name: 7. Package The Artifacts
@@ -113,9 +99,14 @@ jobs:
         mv ${{ env.DIR_NAME }}/build/xmrig final-package/${{ env.EXE_NAME }}
         mv ${{ env.DIR_NAME }}/src/config.json final-package/config.json
         
-        echo "--> Creating .tar.gz archive..."
-        tar -czvf ${{ env.PACKAGE_NAME }}.tar.gz -C final-package/ .
-        echo "✅ Created ${{ env.PACKAGE_NAME }}.tar.gz"
+        echo "--> Creating .tar.gz archive from inside the package directory..."
+        # 关键修正：先进入打包目录，再执行打包，确保压缩包内没有多余的目录层级。
+        # '..' 表示将生成的压缩包存放在上一级目录中。
+        # '.' 表示将当前目录的所有内容打包。
+        cd final-package
+        tar -czvf ../${{ env.PACKAGE_NAME }}.tar.gz .
+        
+        echo "✅ Created clean .tar.gz archive."
 
     - name: 8. Upload Artifact
       uses: actions/upload-artifact@v4
