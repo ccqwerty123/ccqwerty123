@@ -256,15 +256,17 @@ def detect_hardware():
 
 def run_cpu_task(work_unit, num_threads, result_container):
     """
-    [V6 修改] 执行KeyHunt，自动转换范围为16进制，并返回详细的错误信息用于分类。
+    [V6.1 修改] 执行KeyHunt，自动转换范围为16进制，并计算和添加-n参数以确保任务能自动停止。
     """
     address, start_key_dec, end_key_dec = work_unit['address'], work_unit['range']['start'], work_unit['range']['end']
     print(f"[CPU-WORKER] 开始处理地址: {address[:12]}...")
 
-    # --- [V6] 范围转换和日志 ---
+    # --- [V6] 范围转换 ---
     try:
-        start_key_hex = hex(int(start_key_dec))[2:]
-        end_key_hex = hex(int(end_key_dec))[2:]
+        start_key_int = int(start_key_dec)
+        end_key_int = int(end_key_dec)
+        start_key_hex = hex(start_key_int)[2:]
+        end_key_hex = hex(end_key_int)[2:]
         print(f"  -> API 范围 (10进制): {start_key_dec} - {end_key_dec}")
         print(f"  -> 程序范围 (16进制): {start_key_hex} - {end_key_hex}")
     except (ValueError, TypeError):
@@ -273,16 +275,37 @@ def run_cpu_task(work_unit, num_threads, result_container):
         result_container['result'] = {'error': True, 'error_type': 'TRANSIENT', 'error_message': msg}
         return
     # --- [V6] 结束 ---
+
+    # --- [V6.1] 自动计算并添加 -n 参数 ---
+    try:
+        # 1. 计算范围大小
+        keys_to_search = end_key_int - start_key_int + 1
+        if keys_to_search <= 0:
+            raise ValueError("密钥范围无效，结束点小于起始点")
+
+        # 2. 计算 -n 参数值 (向上取整到1024的倍数)
+        n_value = (keys_to_search + 1023) // 1024 * 1024
+        n_value_hex = hex(n_value)
+        print(f"  -> 范围总数: {keys_to_search} | 计算出的 -n 参数: {n_value} ({n_value_hex})")
+
+    except ValueError as e:
+        msg = f"计算-n参数时出错: {e}"
+        print(f"⚠️ [CPU-WORKER] {msg}")
+        result_container['result'] = {'error': True, 'error_type': 'TRANSIENT', 'error_message': msg}
+        return
+    # --- [V6.1] 结束 ---
     
     task_work_dir = os.path.join(BASE_WORK_DIR, f"kh_{address[:10]}_{uuid.uuid4().hex[:6]}")
     os.makedirs(task_work_dir, exist_ok=True)
     kh_address_file = os.path.join(task_work_dir, 'target_address.txt')
     with open(kh_address_file, 'w') as f: f.write(address)
 
+    # --- [V6.1] 修改命令以包含 -n 参数 ---
     command = [
         KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
-        '-l', 'compress', '-t', str(num_threads), # 删除了 '-R' 参数
-        '-r', f'{start_key_hex}:{end_key_hex}' 
+        '-l', 'compress', '-t', str(num_threads),
+        '-r', f'{start_key_hex}:{end_key_hex}',
+        '-n', n_value_hex # <-- 添加计算好的 -n 参数
     ]
     
     # --- [V6] 打印完整命令 ---
@@ -292,7 +315,6 @@ def run_cpu_task(work_unit, num_threads, result_container):
     final_result = {'found': False, 'error': False, 'error_type': None, 'error_message': ''}
 
     try:
-        # 注意：CPU任务使用 Popen 以便实时读取进度
         process = subprocess.Popen(
             command, 
             stdout=subprocess.PIPE, 
@@ -308,7 +330,8 @@ def run_cpu_task(work_unit, num_threads, result_container):
         for line in iter(process.stdout.readline, ''):
             if process.poll() is not None: break
             clean_line = line.strip()
-            if 'K/s' in clean_line or 'M/s' in clean_line:
+            # 简化状态输出，避免因实时捕获密钥而产生的格式混乱
+            if 'keys/s' in clean_line:
                  sys.stdout.write(f"\r  [CPU Status] {clean_line}"); sys.stdout.flush()
             
             match = KEYHUNT_PRIV_KEY_RE.search(line)
@@ -316,19 +339,27 @@ def run_cpu_task(work_unit, num_threads, result_container):
                 found_key = match.group(1).lower()
                 print(f"\n🔔🔔🔔 [CPU-WORKER] 实时捕获到密钥: {found_key}！🔔🔔🔔")
                 final_result = {'found': True, 'private_key': found_key, 'error': False}
-                process.terminate()
+                process.terminate() # 找到后立即终止
                 break
         
+        # 清理进度条
         sys.stdout.write("\r" + " " * 80 + "\r"); sys.stdout.flush()
+        
+        # 即使被terminate，也要获取最终的返回码和错误输出
         returncode = process.wait()
         stderr_output = process.stderr.read()
 
-        if returncode != 0 and not final_result['found']:
+        # 检查是否因为找到密钥而正常退出 (返回码通常为0或已被terminate)
+        if final_result['found']:
+             print("[CPU-WORKER] 任务因找到密钥而成功结束。")
+        # 检查是否是任务执行出错
+        elif returncode != 0:
             final_result['error'] = True
             final_result['error_type'], final_result['error_message'] = classify_task_error(returncode, stderr_output)
             print(f"⚠️ [CPU-WORKER] 任务失败! 类型: {final_result['error_type']}, 原因: {final_result['error_message']}")
-        elif not final_result['found']:
-             print("[CPU-WORKER] 范围搜索完毕但未找到密钥。")
+        # 如果返回码为0且没找到密钥，说明是正常完成
+        else:
+             print("[CPU-WORKER] 范围搜索正常完成但未找到密钥。")
 
     except FileNotFoundError:
         final_result = {'error': True, 'error_type': 'FATAL', 'error_message': f"程序文件未找到: {KEYHUNT_PATH}"}
