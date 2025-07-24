@@ -31,6 +31,8 @@ import shutil
 import requests
 import uuid
 import json
+import logging # <-- 新增
+from queue import Queue, Empty # <-- 新增
 
 # ==============================================================================
 # --- 1. 全局配置 (请根据您的环境修改) ---
@@ -254,66 +256,103 @@ def detect_hardware():
     return hardware_config
 
 
+
+def setup_task_logger(name, log_file):
+    """为单个任务动态配置一个专用的日志记录器。"""
+    # 防止日志重复添加处理器
+    logger = logging.getLogger(name)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+        
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # 文件处理器
+    fh = logging.FileHandler(log_file, encoding='utf-8')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    
+    # 控制台处理器 (可选，用于在主控台也显示部分日志)
+    # sh = logging.StreamHandler(sys.stdout)
+    # sh.setFormatter(formatter)
+    # logger.addHandler(sh)
+    
+    return logger
+
+def reader_thread(pipe, queue):
+    """一个简单的线程目标函数，它从管道(pipe)读取数据并放入队列(queue)。"""
+    try:
+        with pipe:
+            for line in iter(pipe.readline, ''):
+                queue.put(line)
+    except Exception as e:
+        # 在某些情况下管道可能已经关闭，这里记录一下
+        # print(f"[READER-THREAD] 读取管道时发生异常: {e}")
+        pass
+
+
 def run_cpu_task(work_unit, num_threads, result_container):
     """
-    [V6.1 修改] 执行KeyHunt，自动转换范围为16进制，并计算和添加-n参数以确保任务能自动停止。
+    [V8 重构] 
+    - 使用线程和队列实现对 KeyHunt 的非阻塞 I/O 读取，彻底解决卡死问题。
+    - 为每次任务执行创建详细的日志文件，记录所有输入、输出和最终结果。
+    - 改进错误检测逻辑，能识别因无效地址等原因导致的“伪成功”退出。
     """
     address, start_key_dec, end_key_dec = work_unit['address'], work_unit['range']['start'], work_unit['range']['end']
-    print(f"[CPU-WORKER] 开始处理地址: {address[:12]}...")
+    
+    # --- 1. 初始化工作目录和日志 ---
+    task_id = f"kh_{address[:10]}_{uuid.uuid4().hex[:6]}"
+    task_work_dir = os.path.join(BASE_WORK_DIR, task_id)
+    os.makedirs(task_work_dir, exist_ok=True)
+    
+    log_file_path = os.path.join(task_work_dir, 'task_run.log')
+    logger = setup_task_logger(task_id, log_file_path)
 
-    # --- [V6] 范围转换 ---
+    logger.info(f"===== CPU 任务启动: {task_id} =====")
+    logger.info(f"目标地址: {address}")
+    print(f"[CPU-WORKER] 开始处理地址: {address[:12]}... 日志: {log_file_path}")
+
+    # --- 2. 范围转换和参数计算 ---
     try:
         start_key_int = int(start_key_dec)
         end_key_int = int(end_key_dec)
         start_key_hex = hex(start_key_int)[2:]
         end_key_hex = hex(end_key_int)[2:]
-        print(f"  -> API 范围 (10进制): {start_key_dec} - {end_key_dec}")
-        #print(f"  -> 程序范围 (16进制): {start_key_hex} - {end_key_hex}")
-    except (ValueError, TypeError):
-        msg = f"API返回的范围值无效: start={start_key_dec}, end={end_key_dec}"
-        print(f"⚠️ [CPU-WORKER] {msg}")
-        result_container['result'] = {'error': True, 'error_type': 'TRANSIENT', 'error_message': msg}
-        return
-    # --- [V6] 结束 ---
+        logger.info(f"API 范围 (10进制): {start_key_dec} - {end_key_dec}")
+        logger.info(f"程序范围 (16进制): {start_key_hex} - {end_key_hex}")
 
-    # --- [V6.1] 自动计算并添加 -n 参数 ---
-    try:
-        # 1. 计算范围大小
         keys_to_search = end_key_int - start_key_int + 1
         if keys_to_search <= 0:
             raise ValueError("密钥范围无效，结束点小于起始点")
-
-        # 2. 计算 -n 参数值 (向上取整到1024的倍数)
         n_value = (keys_to_search + 1023) // 1024 * 1024
         n_value_hex = hex(n_value)
-        #print(f"  -> 范围总数: {keys_to_search} | 计算出的 -n 参数: {n_value} ({n_value_hex})")
+        logger.info(f"范围总数: {keys_to_search} | 计算出的 -n 参数: {n_value} ({n_value_hex})")
 
-    except ValueError as e:
-        msg = f"计算-n参数时出错: {e}"
+    except (ValueError, TypeError) as e:
+        msg = f"API返回的范围值或计算-n参数时无效: {e}"
+        logger.error(msg)
         print(f"⚠️ [CPU-WORKER] {msg}")
         result_container['result'] = {'error': True, 'error_type': 'TRANSIENT', 'error_message': msg}
         return
-    # --- [V6.1] 结束 ---
-    
-    task_work_dir = os.path.join(BASE_WORK_DIR, f"kh_{address[:10]}_{uuid.uuid4().hex[:6]}")
-    os.makedirs(task_work_dir, exist_ok=True)
+
+    # --- 3. 构建并执行命令 ---
     kh_address_file = os.path.join(task_work_dir, 'target_address.txt')
     with open(kh_address_file, 'w') as f: f.write(address)
 
-    # --- [V6.1] 修改命令以包含 -n 参数 ---
     command = [
         KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
         '-l', 'compress', '-t', str(num_threads),
         '-r', f'{start_key_hex}:{end_key_hex}',
-        '-n', n_value_hex # <-- 添加计算好的 -n 参数
+        '-n', n_value_hex
     ]
     
-    # --- [V6] 打印完整命令 ---
-    print(f"  -> 执行命令: {shlex.join(command)}")
+    command_str = shlex.join(command)
+    logger.info(f"执行命令: {command_str}")
+    print(f"  -> 执行命令: {command_str}")
 
     process, process_info = None, None
-    final_result = {'found': False, 'error': False, 'error_type': None, 'error_message': ''}
-
+    final_result = {'found': False, 'error': False}
+    
     try:
         process = subprocess.Popen(
             command, 
@@ -325,52 +364,112 @@ def run_cpu_task(work_unit, num_threads, result_container):
         )
         process_info = {'process': process, 'name': 'KeyHunt'}
         processes_to_cleanup.append(process_info)
+        logger.info(f"KeyHunt (PID: {process.pid}) 已启动...")
         print(f"[CPU-WORKER] KeyHunt (PID: {process.pid}) 已启动...")
 
-        for line in iter(process.stdout.readline, ''):
-            if process.poll() is not None: break
-            clean_line = line.strip()
-            # 简化状态输出，避免因实时捕获密钥而产生的格式混乱
-            #if 'keys/s' in clean_line:
-                 #sys.stdout.write(f"\r  [CPU Status] {clean_line}"); sys.stdout.flush()
-            
-            match = KEYHUNT_PRIV_KEY_RE.search(line)
-            if match:
-                found_key = match.group(1).lower()
-                print(f"\n🔔🔔🔔 [CPU-WORKER] 实时捕获到密钥: {found_key}！🔔🔔🔔")
-                final_result = {'found': True, 'private_key': found_key, 'error': False}
-                process.terminate() # 找到后立即终止
-                break
-        
-        # 清理进度条
-        sys.stdout.write("\r" + " " * 80 + "\r"); sys.stdout.flush()
-        
-        # 即使被terminate，也要获取最终的返回码和错误输出
-        returncode = process.wait()
-        stderr_output = process.stderr.read()
+        # --- 4. 非阻塞 I/O 读取 ---
+        stdout_q, stderr_q = Queue(), Queue()
+        stdout_thread = threading.Thread(target=reader_thread, args=(process.stdout, stdout_q))
+        stderr_thread = threading.Thread(target=reader_thread, args=(process.stderr, stderr_q))
+        stdout_thread.daemon = stderr_thread.daemon = True
+        stdout_thread.start()
+        stderr_thread.start()
 
-        # 检查是否因为找到密钥而正常退出 (返回码通常为0或已被terminate)
-        if final_result['found']:
-             print("[CPU-WORKER] 任务因找到密钥而成功结束。")
-        # 检查是否是任务执行出错
+        all_stdout_lines = []
+        
+        # 循环直到进程结束
+        while process.poll() is None:
+            try:
+                # 尝试从 stdout 队列读取，超时1秒
+                line = stdout_q.get(timeout=1)
+                clean_line = line.strip()
+                logger.debug(f"[STDOUT] {clean_line}")
+                all_stdout_lines.append(clean_line)
+                
+                # 实时检查是否找到密钥
+                match = KEYHUNT_PRIV_KEY_RE.search(clean_line)
+                if match:
+                    found_key = match.group(1).lower()
+                    msg = f"实时捕获到密钥: {found_key}"
+                    logger.info(f"🔔🔔🔔 {msg} 🔔🔔🔔")
+                    print(f"\n🔔🔔🔔 [CPU-WORKER] {msg}！🔔🔔🔔")
+                    final_result = {'found': True, 'private_key': found_key, 'error': False}
+                    process.terminate() # 找到后立即终止
+                    break # 退出读取循环
+
+            except Empty:
+                # 队列为空是正常现象，表示子进程正在计算而没有输出
+                pass
+            
+            # 检查 stderr，只记录不中断
+            while not stderr_q.empty():
+                line = stderr_q.get_nowait()
+                logger.warning(f"[STDERR] {line.strip()}")
+        
+        # --- 5. 任务结束后的处理 ---
+        returncode = process.wait()
+        logger.info(f"KeyHunt 进程已退出，返回码: {returncode}")
+
+        # 等待读取线程结束，并排空队列中的剩余数据
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        while not stdout_q.empty(): all_stdout_lines.append(stdout_q.get_nowait().strip())
+        
+        stderr_output = "".join(list(stderr_q.queue))
+        if stderr_output: logger.warning(f"最终捕获的完整 STDERR:\n---(start)---\n{stderr_output}\n---(end)---")
+        
+        # --- 6. 最终结果判断 ---
+        if final_result.get('found'):
+            msg = "任务因找到密钥而成功结束。"
+            logger.info(msg)
+            print(f"[CPU-WORKER] {msg}")
         elif returncode != 0:
             final_result['error'] = True
             final_result['error_type'], final_result['error_message'] = classify_task_error(returncode, stderr_output)
-            print(f"⚠️ [CPU-WORKER] 任务失败! 类型: {final_result['error_type']}, 原因: {final_result['error_message']}")
-        # 如果返回码为0且没找到密钥，说明是正常完成
-        else:
-             print("[CPU-WORKER] 范围搜索正常完成但未找到密钥。")
+            msg = f"任务失败! 类型: {final_result['error_type']}, 原因: {final_result['error_message']}"
+            logger.error(msg)
+            print(f"⚠️ [CPU-WORKER] {msg}")
+        else: # returncode == 0 且未找到密钥
+            # [智能判断] 检查是否存在“伪成功”的迹象
+            full_stdout = "\n".join(all_stdout_lines)
+            if "0 values were loaded" in full_stdout or "Ommiting invalid line" in full_stdout:
+                final_result['error'] = True
+                final_result['error_type'] = 'FATAL' # 地址无效是致命错误，无需重试
+                final_result['error_message'] = "KeyHunt报告加载了0个地址，地址格式很可能无效。"
+                msg = f"检测到伪成功退出! {final_result['error_message']}"
+                logger.error(msg)
+                print(f"⚠️ [CPU-WORKER] {msg}")
+            else:
+                msg = "范围搜索正常完成但未找到密钥。"
+                logger.info(msg)
+                print(f"[CPU-WORKER] {msg}")
 
     except FileNotFoundError:
         final_result = {'error': True, 'error_type': 'FATAL', 'error_message': f"程序文件未找到: {KEYHUNT_PATH}"}
+        logger.critical(final_result['error_message'])
     except Exception as e:
         final_result = {'error': True, 'error_type': 'TRANSIENT', 'error_message': f"执行时发生Python异常: {e}"}
+        logger.exception("执行 run_cpu_task 时发生未捕获的Python异常")
     finally:
         if process and process_info in processes_to_cleanup:
             processes_to_cleanup.remove(process_info)
-        shutil.rmtree(task_work_dir, ignore_errors=True)
-        print(f"[CPU-WORKER] 任务清理完成。")
+        
+        # 保留工作目录和日志以供调试
+        # shutil.rmtree(task_work_dir, ignore_errors=True) 
+        msg = f"任务清理完成。工作目录保留于: {task_work_dir}"
+        logger.info(f"===== 任务结束: {task_id} =====\n")
+        print(f"[CPU-WORKER] {msg}")
+
+        # 关闭日志处理器，释放文件句柄
+        for handler in logger.handlers:
+            handler.close()
+            logger.removeHandler(handler)
+            
         result_container['result'] = final_result
+
+
+
+
 
 
 def run_gpu_task(work_unit, gpu_params, result_container):
