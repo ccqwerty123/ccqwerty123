@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-BTC 自动化挖矿总控制器 (V6 - 智能范围转换 & 显存清理版)
+BTC 自动化挖矿总控制器 (V7 - JobKey 集成修复版)
 
 该脚本整合了 API通信、CPU(KeyHunt)挖矿 和 GPU(BitCrack)挖矿三大功能，实现全自动、高容错的工作流程。
 
 新特性:
+- [V7] 修复与服务器的 JobKey 集成：客户端现在会正确接收、处理并提交 JobKey，解决了服务器端 assigned_work 和 recycled_work 列表异常增长的问题。
+- [V7] 增加任务重试次数显示：获取新任务时，会显示其已被重试的次数，便于问题诊断。
 - [V6] 智能范围转换：自动将API返回的十进制范围转换为挖矿程序所需的十六进制格式。
 - [V6] 健壮的显存清理：通过将GPU任务置于独立的子进程中运行，确保任务结束后操作系统能彻底回收CUDA上下文和显存，解决显存泄露问题。
 - [V6] 增强诊断日志：启动任务前会打印完整的命令行和范围转换信息，便于调试。
@@ -146,7 +148,8 @@ def classify_task_error(returncode, stderr_output):
 
 def get_work_with_retry(session, client_id):
     """
-    请求新工作。如果失败（网络/服务器问题），将无限期延迟重试。
+    [V7 修改] 请求新工作。如果失败（网络/服务器问题），将无限期延迟重试。
+    现在会解析并显示任务的重试次数。
     """
     print(f"\n[*] 客户端 '{client_id}' 正在向服务器请求新的工作...")
     while True: # 无限重试循环，直到成功
@@ -155,11 +158,14 @@ def get_work_with_retry(session, client_id):
 
             if response.status_code == 200:
                 work_data = response.json()
-                if work_data.get('address') and work_data.get('range'):
+                if work_data.get('address') and work_data.get('range') and work_data.get('job_key'):
+                    # 【V7 新增】打印更详细的任务信息
+                    retries = work_data.get('retries', 0)
                     print(f"[+] 成功获取工作! 地址: {work_data['address']}, 范围: {work_data['range']['start']} - {work_data['range']['end']}")
+                    print(f"  -> JobKey: {work_data['job_key']}, 重试次数: {retries}")
                     return work_data
                 else:
-                    print(f"[!] 获取工作成功(200)，但响应格式不正确: {response.text}。将在 {API_RETRY_DELAY} 秒后重试...")
+                    print(f"[!] 获取工作成功(200)，但响应格式不正确或缺少job_key: {response.text}。将在 {API_RETRY_DELAY} 秒后重试...")
             
             elif response.status_code == 503:
                 error_message = response.json().get("error", "未知503错误")
@@ -173,14 +179,26 @@ def get_work_with_retry(session, client_id):
 
         time.sleep(API_RETRY_DELAY)
 
-def submit_result(session, address, found, private_key=None):
-    """向服务器提交工作结果。"""
-    payload = {'address': address, 'found': found}
+def submit_result(session, work_unit, found, private_key=None):
+    """
+    [V7 修复] 向服务器提交工作结果。
+    现在会包含 job_key，这是正确处理任务完成状态的关键。
+    """
+    address = work_unit.get('address')
+    job_key = work_unit.get('job_key')
+
+    # 【V7 修复】在提交时必须包含 job_key
+    payload = {
+        'address': address, 
+        'found': found,
+        'job_key': job_key 
+    }
+    
     if found:
-        print(f"[*] 准备向服务器提交为地址 {address} 找到的私钥...")
+        print(f"[*] 准备向服务器提交为地址 {address} 找到的私钥 (JobKey: {job_key})...")
         payload['private_key'] = private_key
     else:
-        print(f"[*] 准备向服务器报告地址 {address} 的范围已搜索完毕 (未找到)。")
+        print(f"[*] 准备向服务器报告地址 {address} 的范围已搜索完毕 (未找到) (JobKey: {job_key})...")
         
     try:
         response = session.post(SUBMIT_URL, json=payload, headers=BROWSER_HEADERS, timeout=30)
@@ -310,6 +328,8 @@ def run_cpu_task(work_unit, num_threads, result_container):
 
     logger.info(f"===== CPU 任务启动: {task_id} =====")
     logger.info(f"目标地址: {address}")
+    # [V7] 记录任务元数据
+    logger.info(f"JobKey: {work_unit.get('job_key')}, 重试次数: {work_unit.get('retries')}")
     print(f"[CPU-WORKER] 开始处理地址: {address[:12]}... 日志: {log_file_path}")
 
     # --- 2. 范围转换和参数计算 ---
@@ -467,11 +487,6 @@ def run_cpu_task(work_unit, num_threads, result_container):
             
         result_container['result'] = final_result
 
-
-
-
-
-
 def run_gpu_task(work_unit, gpu_params, result_container):
     """
     [V6 修改] 执行BitCrack，自动转换范围为16进制，并读取日志文件内容进行错误分类。
@@ -515,7 +530,15 @@ def run_gpu_task(work_unit, gpu_params, result_container):
         # 注意：为了简洁，这里直接等待进程结束，并通过日志文件判断错误。
         # 对于需要实时监控进度的场景，可以改回 Popen。
         with open(log_file_path, 'w') as log_file:
-            process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+            # [V7] 在日志中记录任务元数据
+            log_file.write(f"===== GPU 任务启动 =====\n")
+            log_file.write(f"JobKey: {work_unit.get('job_key')}\n")
+            log_file.write(f"Retries: {work_unit.get('retries')}\n")
+            log_file.write(f"Command: {shlex.join(command)}\n")
+            log_file.write("---------------------------\n\n")
+            log_file.flush()
+            
+            process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
             process_info = {'process': process, 'name': 'BitCrack'}
             processes_to_cleanup.append(process_info)
             print(f"[GPU-WORKER] BitCrack (PID: {process.pid}) 已启动。日志提示: tail -f {shlex.quote(log_file_path)}")
@@ -574,9 +597,9 @@ def run_gpu_task(work_unit, gpu_params, result_container):
 # ==============================================================================
 
 def main():
-    """[V6 修改] 主控制器，使用独立进程处理GPU任务以解决显存泄露。"""
+    """[V7 修改] 主控制器，使用独立进程处理GPU任务，并正确处理JobKey。"""
     client_id = f"btc-controller-{uuid.uuid4().hex[:8]}"
-    print(f"控制器启动 (V6 智能范围转换 & 显存清理版)，客户端 ID: {client_id}")
+    print(f"控制器启动 (V7 JobKey 集成修复版)，客户端 ID: {client_id}")
     os.makedirs(BASE_WORK_DIR, exist_ok=True)
     
     hardware = detect_hardware()
@@ -609,7 +632,8 @@ def main():
                         # 任务成功
                         print(f"✅ {unit_name} 任务成功。重置连续错误计数。")
                         slot['consecutive_errors'] = 0 
-                        submit_result(session, slot['work']['address'], result.get('found', False), result.get('private_key'))
+                        # 【V7 修复】传递整个 work 对象，它包含了 job_key
+                        submit_result(session, slot['work'], result.get('found', False), result.get('private_key'))
                     else:
                         # 任务失败
                         slot['consecutive_errors'] += 1
