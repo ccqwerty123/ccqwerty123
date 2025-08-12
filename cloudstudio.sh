@@ -1,12 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.1 - 修复 VNC 启动问题)                  ==
+# ==  Apache Guacamole 透明安装脚本 (v9.2 - 修复下载链接)                       ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
-# ==  此版本修正了 vncserver 因 xstartup 脚本过早退出而导致的 "Trace/breakpoint  ==
-# ==  trap" 或 "cleanly exited too early" 崩溃的问题。核心改动是使用 'exec'    ==
-# ==  命令来确保 XFCE 会话能够持续运行。                                          ==
+# ==  此版本修正了因使用 Apache 动态镜像链接 (closer.lua) 导致 wget 下载到     ==
+# ==  HTML 页面而非实际文件的问题。现已更换为稳定的 CDN 直接下载链接。            ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -47,43 +46,29 @@ print_step "步骤 1/4：安装 VNC 服务器和 XFCE 桌面"
 sudo apt-get install -y tigervnc-standalone-server xfce4 xfce4-goodies terminator
 check_success $? "安装 VNC 和 XFCE 核心组件"
 
-# ---【核心修正部分 v9.1】自动设置密码并创建正确的 xstartup 文件 ---
 print_info "正在自动生成并设置一个安全的 VNC 密码..."
 VNC_PASS=$(openssl rand -base64 8)
 mkdir -p ~/.vnc
-# 额外增加一个 'n' 的输入，以应对 'view-only password' 提示，确保流程万无一失
 echo -e "${VNC_PASS}\n${VNC_PASS}\nn" | vncpasswd
 check_success $? "自动执行 vncpasswd 命令"
 [ ! -f ~/.vnc/passwd ] && print_error "VNC 密码文件 (~/.vnc/passwd) 创建失败！"
 print_success "VNC 密码已自动设置。"
 echo -e "  ${YELLOW}您的 VNC 连接密码是: ${GREEN}${VNC_PASS}${NC} (此密码已自动配置，仅供记录)"
 
-# 创建一个全新的、健壮的 xstartup 文件来确保会话能够持续
 print_info "正在创建优化的 VNC 启动脚本 (xstartup) 以确保桌面环境稳定运行..."
 cat > ~/.vnc/xstartup << EOF
 #!/bin/sh
-
-# 明确指定桌面环境
 export XDG_CURRENT_DESKTOP="XFCE"
-
-# 取消设置任何可能引起冲突的会话变量
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-
-# 【核心修正】使用 'exec' 命令用 XFCE 会话替换当前的 shell 进程。
-# 这可以防止脚本过早退出，从而保持 VNC 服务持续运行。
 exec startxfce4
 EOF
-# 必须给予执行权限
 chmod +x ~/.vnc/xstartup
 check_success $? "创建并配置优化的 xstartup 文件"
 
-
-# --- 首次启动、诊断和配置流程 (使用经过验证的健壮逻辑) ---
 print_info "正在尝试首次启动 VNC 服务器以验证配置..."
-# 我们传递 -xstartup 参数确保我们的新脚本被使用
 vncserver :1 -xstartup ~/.vnc/xstartup
-sleep 4 # 给予更长的启动时间
+sleep 4
 
 if ! pgrep -f "Xtigervnc :1" > /dev/null; then
     LOG_FILE_PATH=$(find ~/.vnc/ -name "*.log" | head -n 1)
@@ -101,7 +86,6 @@ sleep 1
 print_success "临时 VNC 会话已成功停止。"
 
 print_info "正在以最终配置重新启动 VNC 服务器..."
-# 使用相同的 xstartup 参数重新启动，并允许外部连接 (-localhost no)
 vncserver -localhost no :1 -xstartup ~/.vnc/xstartup
 check_success $? "以最终配置重新启动 VNC 服务器"
 sleep 2
@@ -109,24 +93,23 @@ if ! netstat -tuln | grep -q ':5901'; then
     print_error "VNC 服务器端口 5901 未被监听。服务可能启动失败。"
 fi
 print_success "VNC 服务器已在 :1 (端口 5901) 上成功运行并监听。"
-# ---【第一部分核心修正结束】---
 
 
 # ==============================================================================
-# ==  后续步骤与之前版本相同，现在应该可以正常工作了                       ==
+# == 第二部分：安装 guacd (Guacamole 后端)
 # ==============================================================================
-
-# 第二部分：安装 guacd (Guacamole 后端)
 print_step "步骤 2/4：编译并安装 Guacamole 后端 (guacd)"
 GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-bin libossp-uuid-dev libavcodec-dev libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev libssh2-1-dev libvncserver-dev libtelnet-dev libwebsockets-dev libpulse-dev"
 sudo apt-get install -y $GUACD_DEPS
 check_success $? "安装 guacd 编译依赖项"
 
 GUAC_VERSION="1.5.3" # 您可以按需更改版本
-wget https://apache.org/dyn/closer.lua/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz -O guacamole-server.tar.gz
+# 【核心修正】使用 Apache 的 CDN 直接下载链接，而不是动态选择器页面
+wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz" -O guacamole-server.tar.gz
 check_success $? "下载 Guacamole 源代码"
 tar -xzf guacamole-server.tar.gz
-cd guacamole-server-${GUAC_VERSION}
+check_success $? "解压源代码"
+cd "guacamole-server-${GUAC_VERSION}"
 ./configure --with-systemd-dir=/etc/systemd/system
 check_success $? "运行 ./configure 脚本"
 make
@@ -143,12 +126,15 @@ check_success $? "确认 guacd 服务正在后台运行"
 cd ..
 
 
-# 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
+# ==============================================================================
+# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
+# ==============================================================================
 print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
 sudo apt-get install -y tomcat9
 check_success $? "安装 Tomcat 9"
 sudo mkdir -p /etc/guacamole && sudo chmod 755 /etc/guacamole
-wget https://apache.org/dyn/closer.lua/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war -O guacamole.war
+# 【核心修正】同样使用 CDN 直接下载链接下载 .war 文件
+wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war" -O guacamole.war
 sudo mv guacamole.war /var/lib/tomcat9/webapps/
 check_success $? "部署 .war 文件到 Tomcat"
 
@@ -186,7 +172,9 @@ else
     print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u tomcat9'"
 fi
 
-# 第四部分：完成
+# ==============================================================================
+# == 第四部分：完成
+# ==============================================================================
 print_step "步骤 4/4：安装完成！"
 print_success "所有组件已成功安装并配置。"
 echo -e "\n  访问地址: ${GREEN}http://<您的CloudStudio公网IP>:8080/guacamole/${NC}"
