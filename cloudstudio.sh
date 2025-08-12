@@ -299,6 +299,47 @@ if ! netstat -tuln | grep -q ':8080'; then
     print_warning "端口 8080 未被监听，但继续验证 HTTP 访问..."
 fi
 
+# 检查 WAR 文件是否正确部署
+print_info "检查 Guacamole WAR 文件部署状态..."
+WEBAPP_DIR="/var/lib/${TOMCAT_SERVICE}/webapps"
+if [ ! -f "${WEBAPP_DIR}/guacamole.war" ]; then
+    print_error "guacamole.war 文件不存在于 ${WEBAPP_DIR}/"
+fi
+
+if [ ! -d "${WEBAPP_DIR}/guacamole" ]; then
+    print_warning "Guacamole 应用目录不存在，可能部署失败"
+    print_info "尝试手动解压 WAR 文件..."
+    
+    cd "${WEBAPP_DIR}"
+    sudo -u tomcat mkdir -p guacamole
+    cd guacamole
+    sudo -u tomcat jar -xf ../guacamole.war
+    check_success $? "手动解压 guacamole.war 文件"
+    
+    print_info "重新启动 Tomcat 以重新加载应用..."
+    safe_stop_tomcat "${TOMCAT_SERVICE}"
+    sleep 3
+    start_tomcat_process "${TOMCAT_SERVICE}"
+    
+    echo "等待 20 秒让应用重新加载..."
+    sleep 20
+else
+    print_success "Guacamole 应用目录存在"
+fi
+
+# 检查 Guacamole 配置文件路径
+print_info "验证 Guacamole 配置..."
+if [ ! -f /etc/guacamole/guacamole.properties ]; then
+    print_warning "Guacamole 配置文件不存在"
+fi
+
+# 创建 GUACAMOLE_HOME 符号链接（如果不存在）
+if [ ! -L /usr/share/${TOMCAT_SERVICE}/.guacamole ]; then
+    print_info "创建 GUACAMOLE_HOME 符号链接..."
+    sudo ln -sf /etc/guacamole /usr/share/${TOMCAT_SERVICE}/.guacamole
+    sudo chown -h tomcat:tomcat /usr/share/${TOMCAT_SERVICE}/.guacamole
+fi
+
 HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/guacamole/)
 if [ "$HTTP_CODE" -eq 200 ]; then
     print_success "终极验证通过！Guacamole 登录页面已成功上线 (HTTP Code: $HTTP_CODE)。"
@@ -306,10 +347,46 @@ elif [ "$HTTP_CODE" -eq 302 ] || [ "$HTTP_CODE" -eq 301 ]; then
     print_success "Guacamole 已启动并正在重定向 (HTTP Code: $HTTP_CODE)，这是正常的。"
 else
     print_warning "HTTP 验证返回代码: $HTTP_CODE"
-    print_info "请检查以下日志文件获取详细信息："
-    print_info "  - /var/lib/${TOMCAT_SERVICE}/logs/catalina.out"
-    print_info "  - /usr/share/${TOMCAT_SERVICE}/logs/catalina.out"
-    print_info "  - /var/log/${TOMCAT_SERVICE}/catalina.out"
+    
+    # 提供 ROOT 部署选项
+    print_info "尝试将 Guacamole 部署为 ROOT 应用 (访问 http://ip:8080/)..."
+    cd "${WEBAPP_DIR}"
+    
+    # 备份原 ROOT
+    if [ -d ROOT ]; then
+        sudo mv ROOT ROOT.backup
+    fi
+    if [ -f ROOT.war ]; then
+        sudo mv ROOT.war ROOT.war.backup  
+    fi
+    
+    # 将 guacamole 部署为 ROOT
+    sudo cp guacamole.war ROOT.war
+    sudo -u tomcat mkdir -p ROOT
+    cd ROOT
+    sudo -u tomcat jar -xf ../ROOT.war
+    
+    print_info "重新启动 Tomcat..."
+    safe_stop_tomcat "${TOMCAT_SERVICE}"
+    sleep 3
+    start_tomcat_process "${TOMCAT_SERVICE}"
+    
+    echo "等待 25 秒让 ROOT 应用加载..."
+    sleep 25
+    
+    ROOT_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/)
+    if [ "$ROOT_CODE" -eq 200 ] || [ "$ROOT_CODE" -eq 302 ] || [ "$ROOT_CODE" -eq 301 ]; then
+        print_success "Guacamole 已成功部署为 ROOT 应用！现在可通过 http://your-ip:8080/ 访问"
+        echo -e "\n${GREEN}现在您可以通过以下地址访问 Guacamole：${NC}"
+        echo -e "  ${YELLOW}主要访问地址: ${GREEN}http://<您的IP>:8080/${NC}"
+        echo -e "  ${YELLOW}备用访问地址: ${GREEN}http://<您的IP>:8080/guacamole/${NC}"
+    else
+        print_warning "ROOT 部署也失败了，请检查日志文件"
+        print_info "请检查以下日志文件获取详细信息："
+        print_info "  - /var/lib/${TOMCAT_SERVICE}/logs/catalina.out"
+        print_info "  - /usr/share/${TOMCAT_SERVICE}/logs/catalina.out"
+        print_info "  - /var/log/${TOMCAT_SERVICE}/catalina.out"
+    fi
 fi
 
 # ==============================================================================
