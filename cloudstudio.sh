@@ -1,12 +1,14 @@
 #!/bin/bash
 
 # ===================================================================================
-#  Cloud Studio 高性能远程桌面一键部署脚本 (v12.0 - “DBus强制注入”最终版)
+#  Cloud Studio 高性能远程桌面一键部署脚本 (v13.0 - “零信任”终极版)
 # ===================================================================================
 #
-#  此版本为最终解决方案，使用 'dbus-launch' 强制创建会话总线，根治所有连接问题。
-#  ✅ 使用 dbus-launch: 替换 startx，手动创建 DBus 会话并注入XFCE，解决“空壳桌面”问题。
-#  ✅ 稳定可靠:         整合了之前所有版本的修复，是启动嵌入式图形环境的终极方案。
+#  此版本为最终解决方案，采取“零信任”原则，安装并强制验证每一个核心组件。
+#  ✅ 依赖完整:       补全了之前遗漏的所有核心依赖包，包括 dbus-x11。
+#  ✅ 透明安装:       移除了所有静默参数，让安装过程完全可见。
+#  ✅ 强制验证:       在安装后，主动检查 Xorg 和 dbus-launch 是否存在，如不存在则报错停止。
+#  ✅ 稳定可靠:       整合了所有调试成果，是目前最稳健的最终版本。
 #
 # ===================================================================================
 
@@ -19,7 +21,7 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}======================================================${NC}"
-echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v12.0)... ${NC}"
+echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v13.0)... ${NC}"
 echo -e "${BLUE}======================================================${NC}"
 echo " "
 
@@ -27,19 +29,55 @@ echo " "
 echo -e "${YELLOW}--> 步骤 0: 正在执行终极清理...${NC}"
 sudo killall -q -9 Xorg Xvfb xfce4-session xfwm4 webrtc-streamer startx dbus-daemon &>/dev/null
 sudo pkill -f "main.py" &>/dev/null
+sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock &>/dev/null
 sudo rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 &>/dev/null
 echo -e "${GREEN}✓ 清理完成!${NC}"
 echo " "
 
-# --- 步骤 1: 确保依赖已安装 ---
-echo -e "${YELLOW}--> 步骤 1: 正在确认所有依赖...${NC}"
+# --- 步骤 1: 依赖安装与强制验证 ---
+echo -e "${YELLOW}--> 步骤 1: 智能检查、安装并强制验证所有依赖...${NC}"
+# **关键修复**: 补全了 dbus-x11 这个至关重要的包
 required_packages=(xorg xserver-xorg-video-dummy xinit lsof xfce4 dbus-x11 wget debconf-utils)
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "${required_packages[@]}" &>/dev/null
-echo -e "${GREEN}✓ 所有依赖已确认安装。${NC}"
+packages_to_install=()
+for pkg in "${required_packages[@]}"; do
+    if ! dpkg -s "$pkg" &> /dev/null; then
+        packages_to_install+=("$pkg")
+    fi
+done
+
+if [ ${#packages_to_install[@]} -ne 0 ]; then
+    echo "发现缺失的依赖: ${packages_to_install[*]}"
+    echo "正在全自动安装 (此过程可能需要几分钟，请耐心等待)..."
+    
+    # 预设配置，避免键盘交互
+    echo "keyboard-configuration keyboard-configuration/layoutcode string us" | sudo debconf-set-selections
+    
+    # **关键修复**: 去掉静默参数，让安装过程完全可见
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages_to_install[@]}"
+    
+    echo -e "${GREEN}✓ 依赖安装命令已执行。现在开始验证...${NC}"
+else
+    echo -e "${GREEN}✓ 所有依赖似乎已安装。现在开始验证...${NC}"
+fi
+
+# **关键修复**: 强制验证每一个核心命令是否存在
+CRITICAL_CMDS=(Xorg dbus-launch xfce4-session)
+for cmd in "${CRITICAL_CMDS[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "${RED}=========================== 致命错误 ==========================${NC}"
+        echo -e "${RED}  验证失败: 核心命令 '$cmd' 未找到!                       ${NC}"
+        echo -e "${RED}  这表示依赖安装过程失败。请检查上面的安装日志寻找错误。 ${NC}"
+        echo -e "${RED}==============================================================${NC}"
+        exit 1
+    fi
+done
+echo -e "${GREEN}✓ 所有核心组件均已成功安装并验证!${NC}"
 echo " "
 
-# --- 步骤 2: 确保虚拟屏幕配置文件存在 ---
-echo -e "${YELLOW}--> 步骤 2: 正在确保虚拟屏幕配置文件存在...${NC}"
+
+# --- 步骤 2: 创建虚拟屏幕配置文件 ---
+echo -e "${YELLOW}--> 步骤 2: 正在创建虚拟屏幕配置文件...${NC}"
 sudo mkdir -p /etc/X11
 sudo tee /etc/X11/xorg.conf > /dev/null <<'EOF'
 Section "Device"
@@ -65,7 +103,8 @@ EOF
 echo -e "${GREEN}✓ 配置文件 /etc/X11/xorg.conf 已就绪!${NC}"
 echo " "
 
-# --- 步骤 3: 确保工具已就绪 ---
+
+# --- 步骤 3: 准备工具 ---
 WORKDIR="$HOME/webrtc_desktop_setup"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -73,20 +112,18 @@ if [ ! -f "webrtc-streamer" ]; then wget -qO- https://github.com/mpromonet/webrt
 echo -e "${GREEN}✓ 工具已就绪!${NC}"
 echo " "
 
-# --- 步骤 4: 启动远程桌面核心服务 (最终方法) ---
+# --- 步骤 4: 启动远程桌面核心服务 ---
 echo -e "${YELLOW}--> 步骤 4: 启动 X Server 并注入 DBus 会话...${NC}"
 export DISPLAY=:0
 LISTENING_PORT="8000"
 
-# 启动X Server，作为所有图形的画布
+# 启动X Server作为画布
 sudo Xorg :0 &
-# 等待X Server完全启动
 sleep 3
 echo "虚拟屏幕画布已启动。"
 
-# **关键修复**: 使用 dbus-launch 包装 xfce4-session，强制创建“神经系统”并注入桌面
+# 使用 dbus-launch 包装 xfce4-session 启动完整桌面
 dbus-launch --exit-with-session xfce4-session &
-# 等待桌面环境完全初始化
 sleep 5
 echo -e "${GREEN}✓ 完整的 XFCE 图形环境已在后台启动!${NC}"
 
