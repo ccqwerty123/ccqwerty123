@@ -1,12 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.3 - 兼容非 systemd 环境)                ==
+# ==  Apache Guacamole 透明安装脚本 (v9.4 - 弹性 Tomcat 安装)                   ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
-# ==  此版本修正了在 Docker/容器等非 systemd 环境下，因无法使用 systemctl       ==
-# ==  命令而导致的 guacd 启动失败问题。脚本现在会自动检测环境并回退到直接      ==
-# ==  启动 guacd 进程的方式。                                                     ==
+# ==  此版本解决了因不同系统软件源缺少特定版本 Tomcat (如 tomcat9) 的问题。     ==
+# ==  脚本现在会自动尝试安装 tomcat10, tomcat9, 或 tomcat8，并兼容重启。        ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -20,6 +19,8 @@ print_step() { echo -e "\n${BLUE}===============================================
 print_success() { echo -e "${GREEN}[✔] 成功: ${1}${NC}"; }
 print_error() { echo -e "${RED}[✘] 失败: ${1}${NC}\n${RED}脚本已终止。请检查上面的错误信息并解决问题后重试。${NC}"; exit 1; }
 print_info() { echo -e "${YELLOW}[i] 信息: ${1}${NC}"; }
+# 【修正】添加缺失的 print_warning 函数
+print_warning() { echo -e "${YELLOW}[!] 警告: ${1}${NC}"; }
 
 check_success() { [ $1 -eq 0 ] && print_success "${2}" || print_error "${2}"; }
 # --- 函数定义结束 ---
@@ -41,7 +42,7 @@ read -p "如果已确认，请按 Enter 键继续..."
 
 
 # ==============================================================================
-# == 第一部分：安装并运行 VNC 服务器 (桌面环境)
+# == 第一部分：安装并运行 VNC 服务器 (桌面环境) - (无改动)
 # ==============================================================================
 print_step "步骤 1/4：安装 VNC 服务器和 XFCE 桌面"
 sudo apt-get install -y tigervnc-standalone-server xfce4 xfce4-goodies terminator
@@ -70,34 +71,26 @@ check_success $? "创建并配置优化的 xstartup 文件"
 print_info "正在尝试首次启动 VNC 服务器以验证配置..."
 vncserver :1 -xstartup ~/.vnc/xstartup
 sleep 4
-
 if ! pgrep -f "Xtigervnc :1" > /dev/null; then
     LOG_FILE_PATH=$(find ~/.vnc/ -name "*.log" | head -n 1)
     print_error "VNC 服务启动失败！未能检测到 'Xtigervnc :1' 进程。"
-    if [ -n "$LOG_FILE_PATH" ] && [ -f "$LOG_FILE_PATH" ]; then
-        print_info "以下是相关日志 ($LOG_FILE_PATH) 的内容："
-        echo -e "${RED}--- 日志开始 ---"; cat "$LOG_FILE_PATH"; echo -e "--- 日志结束 ---${NC}"
-    fi
+    [ -n "$LOG_FILE_PATH" ] && [ -f "$LOG_FILE_PATH" ] && print_info "日志内容:\n$(cat $LOG_FILE_PATH)"
     exit 1
 fi
 print_success "VNC 服务已成功临时启动。"
-
 vncserver -kill :1 > /dev/null 2>&1 || pkill -f "Xtigervnc :1"
 sleep 1
 print_success "临时 VNC 会话已成功停止。"
-
 print_info "正在以最终配置重新启动 VNC 服务器..."
 vncserver -localhost no :1 -xstartup ~/.vnc/xstartup
 check_success $? "以最终配置重新启动 VNC 服务器"
 sleep 2
-if ! netstat -tuln | grep -q ':5901'; then
-    print_error "VNC 服务器端口 5901 未被监听。服务可能启动失败。"
-fi
+if ! netstat -tuln | grep -q ':5901'; then print_error "VNC 服务器端口 5901 未被监听。"; fi
 print_success "VNC 服务器已在 :1 (端口 5901) 上成功运行并监听。"
 
 
 # ==============================================================================
-# == 第二部分：安装 guacd (Guacamole 后端)
+# == 第二部分：安装 guacd (Guacamole 后端) - (无改动)
 # ==============================================================================
 print_step "步骤 2/4：编译并安装 Guacamole 后端 (guacd)"
 GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-bin libossp-uuid-dev libavcodec-dev libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev libssh2-1-dev libvncserver-dev libtelnet-dev libwebsockets-dev libpulse-dev"
@@ -119,7 +112,6 @@ check_success $? "安装编译好的文件 (make install)"
 sudo ldconfig
 check_success $? "更新动态链接库缓存"
 
-# 【核心修正】检测环境是否支持 systemd，如果不支持则直接启动 guacd 进程
 if [ -d /run/systemd/system ]; then
     print_info "检测到 systemd 环境，使用 systemctl 启动 guacd..."
     sudo systemctl enable guacd && sudo systemctl start guacd
@@ -128,30 +120,48 @@ if [ -d /run/systemd/system ]; then
     sudo systemctl is-active --quiet guacd
     check_success $? "确认 guacd 服务正在后台运行 (via systemctl)"
 else
-    print_warning "未检测到 systemd 环境 (常见于 Docker/容器)。"
-    print_info "将直接启动 guacd 守护进程..."
-    # 直接运行可执行文件，它会自动作为守护进程在后台运行
+    print_warning "未检测到 systemd 环境。将直接启动 guacd 守护进程..."
     sudo /usr/local/sbin/guacd
     check_success $? "直接执行 guacd 命令"
     sleep 2
-    # 使用 pgrep 检查进程是否存在
     pgrep guacd > /dev/null
     check_success $? "确认 guacd 进程正在后台运行 (via pgrep)"
 fi
-
 cd ..
 
 
 # ==============================================================================
-# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
+# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端) - (核心修正)
 # ==============================================================================
 print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
-sudo apt-get install -y tomcat9
-check_success $? "安装 Tomcat 9"
+
+# 【核心修正】弹性安装 Tomcat，并设置动态变量
+TOMCAT_VERSION_MAJOR=""
+TOMCAT_SERVICE=""
+TOMCAT_WEBAPPS_DIR=""
+print_info "正在尝试安装合适的 Tomcat 版本 (10, 9, 或 8)..."
+
+if sudo apt-get install -y tomcat10 > /dev/null 2>&1; then
+    TOMCAT_VERSION_MAJOR="10"
+elif sudo apt-get install -y tomcat9 > /dev/null 2>&1; then
+    TOMCAT_VERSION_MAJOR="9"
+elif sudo apt-get install -y tomcat8 > /dev/null 2>&1; then
+    TOMCAT_VERSION_MAJOR="8"
+fi
+
+if [ -n "$TOMCAT_VERSION_MAJOR" ]; then
+    TOMCAT_SERVICE="tomcat${TOMCAT_VERSION_MAJOR}"
+    TOMCAT_WEBAPPS_DIR="/var/lib/${TOMCAT_SERVICE}/webapps/"
+    print_success "成功安装 Tomcat ${TOMCAT_VERSION_MAJOR}。"
+else
+    print_error "无法安装任何受支持的 Tomcat 版本 (10, 9, 8)。请检查您的 apt 软件源配置。"
+fi
+
 sudo mkdir -p /etc/guacamole && sudo chmod 755 /etc/guacamole
 wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war" -O guacamole.war
-sudo mv guacamole.war /var/lib/tomcat9/webapps/
-check_success $? "部署 .war 文件到 Tomcat"
+# 使用动态路径变量
+sudo mv guacamole.war "${TOMCAT_WEBAPPS_DIR}"
+check_success $? "部署 .war 文件到 ${TOMCAT_WEBAPPS_DIR}"
 
 echo -e "${YELLOW}--- 自动化 Guacamole 密码配置 ---${NC}"
 read -sp "请为 Guacamole 网页登录设置一个新密码 (这是您访问网页时用的): " GUAC_PASS; echo
@@ -174,17 +184,31 @@ sudo bash -c 'cat > /etc/guacamole/user-mapping.xml' << EOF
 </user-mapping>
 EOF
 check_success $? "创建并自动填入所有配置文件"
+# Tomcat 用户通常就是 'tomcat'，与版本无关
 sudo chown tomcat:tomcat /etc/guacamole/ -R
 check_success $? "设置配置文件权限"
-sudo systemctl restart tomcat9
-check_success $? "重启 Tomcat 服务"
+
+# 【核心修正】使用动态服务名，并兼容非 systemd 环境
+if [ -d /run/systemd/system ]; then
+    sudo systemctl restart "${TOMCAT_SERVICE}"
+    check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via systemctl)"
+else
+    print_warning "非 systemd 环境，将使用 init.d 脚本重启 Tomcat..."
+    if [ -f "/etc/init.d/${TOMCAT_SERVICE}" ]; then
+        sudo /etc/init.d/"${TOMCAT_SERVICE}" restart
+        check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via init.d)"
+    else
+        print_error "找不到 Tomcat 的 init.d 重启脚本 (/etc/init.d/${TOMCAT_SERVICE})。"
+    fi
+fi
+
 echo "等待 20 秒让 Guacamole Web 应用完成初始化..."
 sleep 20
 HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/guacamole/)
 if [ "$HTTP_CODE" -eq 200 ]; then
     print_success "终极验证通过！Guacamole 登录页面已成功上线 (HTTP Code: $HTTP_CODE)。"
 else
-    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u tomcat9' 或 'sudo cat /var/log/tomcat9/catalina.out'"
+    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u ${TOMCAT_SERVICE}' 或 'sudo cat /var/log/${TOMCAT_SERVICE}/catalina.out'"
 fi
 
 # ==============================================================================
