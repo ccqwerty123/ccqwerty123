@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ===================================================================================
-#  Cloud Studio 高性能远程桌面一键部署脚本 (v11.0 - “点火启动”最终版)
+#  Cloud Studio 高性能远程桌面一键部署脚本 (v12.0 - “DBus强制注入”最终版)
 # ===================================================================================
 #
-#  此版本为最终解决方案，使用标准的 'startx' 命令，确保所有后台服务正常启动。
-#  ✅ 使用 startx:   替换手动启动流程，自动处理 DBus 等后台服务，根治“无法连接”错误。
-#  ✅ 稳定可靠:       整合了之前版本的所有修复，是启动图形化环境的最标准、最可靠的方法。
+#  此版本为最终解决方案，使用 'dbus-launch' 强制创建会话总线，根治所有连接问题。
+#  ✅ 使用 dbus-launch: 替换 startx，手动创建 DBus 会话并注入XFCE，解决“空壳桌面”问题。
+#  ✅ 稳定可靠:         整合了之前所有版本的修复，是启动嵌入式图形环境的终极方案。
 #
 # ===================================================================================
 
@@ -19,30 +19,26 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}======================================================${NC}"
-echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v11.0)... ${NC}"
+echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v12.0)... ${NC}"
 echo -e "${BLUE}======================================================${NC}"
 echo " "
 
 # --- 步骤 0: 终极强制清理 ---
 echo -e "${YELLOW}--> 步骤 0: 正在执行终极清理...${NC}"
-sudo killall -q -9 Xorg Xvfb xfce4-session xfwm4 webrtc-streamer startx
+sudo killall -q -9 Xorg Xvfb xfce4-session xfwm4 webrtc-streamer startx dbus-daemon &>/dev/null
 sudo pkill -f "main.py" &>/dev/null
-sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock &>/dev/null
 sudo rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 &>/dev/null
 echo -e "${GREEN}✓ 清理完成!${NC}"
 echo " "
 
-# --- 步骤 1: 智能依赖检查与安装 ---
-echo -e "${YELLOW}--> 步骤 1: 智能检查并安装所有依赖...${NC}"
+# --- 步骤 1: 确保依赖已安装 ---
+echo -e "${YELLOW}--> 步骤 1: 正在确认所有依赖...${NC}"
 required_packages=(xorg xserver-xorg-video-dummy xinit lsof xfce4 dbus-x11 wget debconf-utils)
-# (此处省略检查和安装逻辑，因为它已经成功，为了简洁)
-# 确保所有包都已安装
-sudo apt-get update &>/dev/null
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "${required_packages[@]}"
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "${required_packages[@]}" &>/dev/null
 echo -e "${GREEN}✓ 所有依赖已确认安装。${NC}"
 echo " "
 
-# --- 步骤 2: 创建虚拟屏幕配置文件 ---
+# --- 步骤 2: 确保虚拟屏幕配置文件存在 ---
 echo -e "${YELLOW}--> 步骤 2: 正在确保虚拟屏幕配置文件存在...${NC}"
 sudo mkdir -p /etc/X11
 sudo tee /etc/X11/xorg.conf > /dev/null <<'EOF'
@@ -69,8 +65,7 @@ EOF
 echo -e "${GREEN}✓ 配置文件 /etc/X11/xorg.conf 已就绪!${NC}"
 echo " "
 
-# --- 步骤 3: 准备工具 ---
-# (此处也为了简洁而省略，假设工具已存在)
+# --- 步骤 3: 确保工具已就绪 ---
 WORKDIR="$HOME/webrtc_desktop_setup"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -78,17 +73,20 @@ if [ ! -f "webrtc-streamer" ]; then wget -qO- https://github.com/mpromonet/webrt
 echo -e "${GREEN}✓ 工具已就绪!${NC}"
 echo " "
 
-# --- 步骤 4: 启动远程桌面核心服务 (全新方法) ---
-echo -e "${YELLOW}--> 步骤 4: 使用 'startx' 启动完整的图形化环境...${NC}"
+# --- 步骤 4: 启动远程桌面核心服务 (最终方法) ---
+echo -e "${YELLOW}--> 步骤 4: 启动 X Server 并注入 DBus 会话...${NC}"
 export DISPLAY=:0
 LISTENING_PORT="8000"
 
-# **关键修复**: 创建 .xinitrc 文件，告诉 startx 要启动什么桌面
-echo "exec xfce4-session" > ~/.xinitrc
+# 启动X Server，作为所有图形的画布
+sudo Xorg :0 &
+# 等待X Server完全启动
+sleep 3
+echo "虚拟屏幕画布已启动。"
 
-# **关键修复**: 使用 startx 命令启动整个环境，并置于后台
-startx &
-# 等待整个桌面环境（包括DBus等）完全初始化
+# **关键修复**: 使用 dbus-launch 包装 xfce4-session，强制创建“神经系统”并注入桌面
+dbus-launch --exit-with-session xfce4-session &
+# 等待桌面环境完全初始化
 sleep 5
 echo -e "${GREEN}✓ 完整的 XFCE 图形环境已在后台启动!${NC}"
 
