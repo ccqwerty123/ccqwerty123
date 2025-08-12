@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # ===================================================================================
-#  Cloud Studio 高性能远程桌面一键部署脚本 (v15.0 - “NVIDIA硬件加速”终极版)
+#  Cloud Studio 高性能远程桌面一键部署脚本 (v17.0 - “零信任混合加速”最终版)
 # ===================================================================================
 #
-#  此版本为最理想的硬件加速方案，旨在实现 GPU 渲染 + GPU 编码。
-#  ✅ NVIDIA 虚拟屏幕: 修改 xorg.conf，强制 Xorg 使用 NVIDIA 驱动创建虚拟屏幕，实现 GPU 渲染。
-#  ✅ 端到端硬件加速:  Xorg 使用 GPU 渲染桌面，webrtc-streamer 使用 GPU (NVENC) 编码视频。
-#  ✅ 性能最优:         这是理论上能达到的最佳性能方案。
+#  此版本为基于所有调试日志的最终解决方案，采取“零信任”原则和最稳健的“混合加速”策略。
+#  ✅ 诊断结论:         环境的 NVIDIA 显示驱动损坏，无法进行 GPU 渲染，但视频编码单元可能可用。
+#  ✅ 混合加速策略:    【最终方案】使用最稳定的 Xvfb 进行 CPU 渲染，同时尝试使用 NVENC 进行 GPU 视频编码。
+#  ✅ 零信任验证:       【强制】在安装后主动验证每一个核心组件是否存在，如不存在则报错停止。
+#  ✅ 稳定与性能兼顾:   此方案是当前环境下性能与稳定性的理论最优解。
 #
 # ===================================================================================
 
@@ -20,7 +21,7 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}======================================================${NC}"
-echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v15.0)... ${NC}"
+echo -e "${BLUE}  🚀 启动 Cloud Studio 远程桌面部署 (v17.0)... ${NC}"
 echo -e "${BLUE}======================================================${NC}"
 echo " "
 
@@ -32,78 +33,73 @@ sudo rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 &>/dev/null
 echo -e "${GREEN}✓ 清理完成!${NC}"
 echo " "
 
-# --- 步骤 1: 依赖安装 ---
-echo -e "${YELLOW}--> 步骤 1: 正在安装所有依赖...${NC}"
-# 注意：我们重新使用 xorg
-required_packages=(xorg xinit lsof xfce4 dbus-x11 wget debconf-utils)
-sudo DEBIAN_FRONTEND=noninteractive apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${required_packages[@]}"
-echo -e "${GREEN}✓ 所有依赖已确认安装。${NC}"
+# --- 步骤 1: 依赖安装与强制验证 ---
+echo -e "${YELLOW}--> 步骤 1: 正在安装并强制验证 Xvfb 方案所需依赖...${NC}"
+required_packages=(xvfb xinit lsof xfce4 dbus-x11 wget)
+packages_to_install=()
+for pkg in "${required_packages[@]}"; do
+    if ! dpkg -s "$pkg" &> /dev/null; then
+        packages_to_install+=("$pkg")
+    fi
+done
+
+if [ ${#packages_to_install[@]} -ne 0 ]; then
+    echo "发现缺失的依赖: ${packages_to_install[*]}"
+    echo "正在全自动安装 (此过程可能需要几分钟，请耐心等待)..."
+    sudo apt-get update -y
+    # **关键**: 去掉静默参数，让安装过程完全可见
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages_to_install[@]}"
+    echo -e "${GREEN}✓ 依赖安装命令已执行。现在开始验证...${NC}"
+else
+    echo -e "${GREEN}✓ 所有依赖似乎已安装。现在开始验证...${NC}"
+fi
+
+# **关键**: 恢复并加强强制验证步骤
+CRITICAL_CMDS=(Xvfb dbus-launch xfce4-session)
+for cmd in "${CRITICAL_CMDS[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "${RED}=========================== 致命错误 ==========================${NC}"
+        echo -e "${RED}  验证失败: 核心命令 '$cmd' 未找到!                       ${NC}"
+        echo -e "${RED}  这表示依赖安装过程失败。请检查上面的安装日志寻找错误。 ${NC}"
+        echo -e "${RED}==============================================================${NC}"
+        exit 1
+    fi
+done
+echo -e "${GREEN}✓ 所有核心组件均已成功安装并验证!${NC}"
 echo " "
 
-# --- 步骤 2: 创建 NVIDIA 虚拟屏幕配置文件 ---
-echo -e "${YELLOW}--> 步骤 2: 正在创建 NVIDIA 虚拟屏幕配置文件...${NC}"
-# **关键修复**: 创建一个专门用于 NVIDIA 的 xorg.conf
-# 它会强制 Xorg 加载 nvidia 驱动，并利用 "UseDisplayDevice" "none" 创建一个无头屏幕
-sudo tee /etc/X11/xorg.conf > /dev/null <<'EOF'
-Section "ServerLayout"
-    Identifier "Layout0"
-    Screen 0 "Screen0" 0 0
-EndSection
 
-Section "Device"
-    Identifier "Device0"
-    Driver "nvidia"
-    VendorName "NVIDIA Corporation"
-    BoardName "Tesla T4"  # 可以改成你的显卡型号，或者保持通用
-EndSection
-
-Section "Screen"
-    Identifier "Screen0"
-    Device "Device0"
-    Monitor "Monitor0"
-    DefaultDepth 24
-    Option "AllowEmptyInitialConfiguration" "True"
-    Option "UseDisplayDevice" "none"
-    SubSection "Display"
-        Depth 24
-        Modes "1600x900"
-    EndSubSection
-EndSection
-
-Section "Monitor"
-    Identifier "Monitor0"
-    HorizSync 30.0 - 80.0
-    VertRefresh 60.0
-EndSection
-EOF
-echo -e "${GREEN}✓ NVIDIA 配置文件 /etc/X11/xorg.conf 创建成功!${NC}"
-echo " "
-
-# --- 步骤 3: 准备工具 ---
+# --- 步骤 2: 准备工具 ---
 WORKDIR="$HOME/webrtc_desktop_setup"
+mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 if [ ! -f "webrtc-streamer" ]; then wget -qO- https://github.com/mpromonet/webrtc-streamer/releases/download/v0.8.2/webrtc-streamer-v0.8.2-Linux-x86_64-Release.tar.gz | tar zx --strip-components=1; fi
 echo -e "${GREEN}✓ 工具已就绪!${NC}"
 echo " "
 
-# --- 步骤 4: 启动远程桌面核心服务 ---
-echo -e "${YELLOW}--> 步骤 4: 启动硬件加速的 X Server 并注入 DBus 会话...${NC}"
+# --- 步骤 3: 启动远程桌面核心服务 ---
+echo -e "${YELLOW}--> 步骤 3: 启动 Xvfb 画布 (CPU渲染) 并注入 DBus 会话...${NC}"
 export DISPLAY=:0
 LISTENING_PORT="8000"
 
-# 启动硬件加速的 Xorg 服务器
-sudo Xorg :0 &
-sleep 5 # 等待 X Server 完全启动
-echo "硬件加速的 Xorg 已启动。"
+# 使用 Xvfb 启动一个 1600x900x24 的纯内存虚拟屏幕
+sudo Xvfb :0 -screen 0 1600x900x24 -ac +extension GLX +render -noreset &
+sleep 3
+echo "纯内存虚拟屏幕 (Xvfb) 已启动。"
 
-# 启动完整的 XFCE 桌面
+# 使用 dbus-launch 启动完整的 XFCE 桌面
 dbus-launch --exit-with-session xfce4-session &
 sleep 5
 echo -e "${GREEN}✓ 完整的 XFCE 图形环境已在后台启动!${NC}"
 
-# 必须使用 NVENC 编码器
-VCODEC_OPTION="vcodec=h264_nvenc"
+# 智能判断是否可以使用 NVENC 进行 GPU 视频编码
+if nvidia-smi &> /dev/null; then
+    echo -e "${GREEN}✓ 检测到 NVIDIA GPU! 将尝试使用 NVENC 进行硬件视频编码。${NC}"
+    VCODEC_OPTION="vcodec=h264_nvenc"
+else
+    echo -e "${YELLOW}! 未检测到 NVIDIA GPU。将使用 CPU 进行软件视频编码。${NC}"
+    VCODEC_OPTION="vcodec=h264"
+fi
 
 echo "------------------------------------------------------"
 echo -e "${GREEN}启动 WebRTC 直播... 访问端口 ${LISTENING_PORT} 进入桌面${NC}"
