@@ -218,6 +218,11 @@ cd ..
 # ==============================================================================
 print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
 
+# 安装 default-jdk 以获取 jar 命令
+print_info "安装 Java 开发工具包 (包含 jar 命令)..."
+sudo apt-get install -y default-jdk
+check_success $? "安装 Java 开发工具包"
+
 TOMCAT_VERSION_MAJOR=""
 TOMCAT_SERVICE=""
 TOMCAT_WEBAPPS_DIR=""
@@ -245,7 +250,9 @@ sudo mv guacamole.war "${TOMCAT_WEBAPPS_DIR}"
 check_success $? "部署 .war 文件到 ${TOMCAT_WEBAPPS_DIR}"
 
 echo -e "${YELLOW}--- 自动化 Guacamole 密码配置 ---${NC}"
-read -sp "请为 Guacamole 网页登录设置一个新密码 (这是您访问网页时用的): " GUAC_PASS; echo
+# 使用固定的安全密码，避免交互输入问题
+GUAC_PASS="Guacamole2024!"
+print_success "已设置默认登录密码为: ${GUAC_PASS}"
 
 sudo bash -c 'cat > /etc/guacamole/guacamole.properties' << EOF
 guacd-hostname: localhost
@@ -313,7 +320,15 @@ if [ ! -d "${WEBAPP_DIR}/guacamole" ]; then
     cd "${WEBAPP_DIR}"
     sudo -u tomcat mkdir -p guacamole
     cd guacamole
-    sudo -u tomcat jar -xf ../guacamole.war
+    
+    # 检查 jar 命令是否可用，如果不可用则使用 unzip
+    if command -v jar >/dev/null 2>&1; then
+        sudo -u tomcat jar -xf ../guacamole.war
+    elif command -v unzip >/dev/null 2>&1; then
+        sudo -u tomcat unzip -q ../guacamole.war
+    else
+        print_error "无法找到 jar 或 unzip 命令来解压 WAR 文件"
+    fi
     check_success $? "手动解压 guacamole.war 文件"
     
     print_info "重新启动 Tomcat 以重新加载应用..."
@@ -364,7 +379,15 @@ else
     sudo cp guacamole.war ROOT.war
     sudo -u tomcat mkdir -p ROOT
     cd ROOT
-    sudo -u tomcat jar -xf ../ROOT.war
+    
+    # 使用 jar 或 unzip 解压
+    if command -v jar >/dev/null 2>&1; then
+        sudo -u tomcat jar -xf ../ROOT.war
+    elif command -v unzip >/dev/null 2>&1; then
+        sudo -u tomcat unzip -q ../ROOT.war
+    else
+        print_error "无法找到解压工具"
+    fi
     
     print_info "重新启动 Tomcat..."
     safe_stop_tomcat "${TOMCAT_SERVICE}"
@@ -394,13 +417,40 @@ fi
 # ==============================================================================
 print_step "步骤 4/4：安装完成！"
 print_success "所有组件已成功安装并配置。"
-echo -e "\n  访问地址: ${GREEN}http://<您的CloudStudio公网IP>:8080/guacamole/${NC}"
-echo -e "  用户名:   ${GREEN}user${NC}"
-echo -e "  密码:     ${GREEN}您刚刚为 Guacamole 设置的网页登录密码${NC}\n"
-echo -e "\n${YELLOW}故障排除提示:${NC}"
-echo -e "  如果无法访问，请检查以下几点："
-echo -e "  1. 确保端口 8080 在防火墙中已开放"
-echo -e "  2. 检查 Tomcat 进程: ${GREEN}ps aux | grep tomcat${NC}"
-echo -e "  3. 检查端口监听: ${GREEN}netstat -tuln | grep 8080${NC}"
-echo -e "  4. 查看日志: ${GREEN}sudo tail -f /var/lib/${TOMCAT_SERVICE}/logs/catalina.out${NC}"
-echo "祝您使用愉快！"
+
+echo -e "\n${BLUE}=== Guacamole 访问信息 ===${NC}"
+echo -e "  ${YELLOW}推荐访问地址: ${GREEN}http://<您的CloudStudio公网IP>:8080/${NC}"
+echo -e "  ${YELLOW}备用访问地址: ${GREEN}http://<您的CloudStudio公网IP>:8080/guacamole/${NC}"
+echo -e "  ${YELLOW}用户名: ${GREEN}user${NC}"
+echo -e "  ${YELLOW}密码: ${GREEN}Guacamole2024!${NC}"
+
+echo -e "\n${BLUE}=== 手动修复指南（如果上述地址无法访问）===${NC}"
+echo -e "${YELLOW}方法1 - 检查部署状态:${NC}"
+echo -e "  sudo ls -la /var/lib/${TOMCAT_SERVICE}/webapps/"
+echo -e "  sudo ls -la /var/lib/${TOMCAT_SERVICE}/webapps/guacamole/"
+
+echo -e "\n${YELLOW}方法2 - 手动重新部署:${NC}"
+echo -e "  cd /var/lib/${TOMCAT_SERVICE}/webapps/"
+echo -e "  sudo rm -rf guacamole guacamole.war"
+echo -e "  sudo wget https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war -O guacamole.war"
+echo -e "  sudo chown tomcat:tomcat guacamole.war"
+echo -e "  sudo systemctl restart ${TOMCAT_SERVICE}"
+
+echo -e "\n${YELLOW}方法3 - 部署为 ROOT 应用（直接访问 http://ip:8080/）:${NC}"
+echo -e "  cd /var/lib/${TOMCAT_SERVICE}/webapps/"
+echo -e "  sudo mv ROOT ROOT.backup"
+echo -e "  sudo cp guacamole.war ROOT.war"
+echo -e "  sudo systemctl restart ${TOMCAT_SERVICE}"
+
+echo -e "\n${YELLOW}方法4 - 使用其他端口:${NC}"
+echo -e "  编辑 /etc/${TOMCAT_SERVICE}/server.xml"
+echo -e "  将端口 8080 改为 8090 或其他端口"
+echo -e "  重启 Tomcat 服务"
+
+echo -e "\n${YELLOW}故障排除命令:${NC}"
+echo -e "  检查 Tomcat 进程: ${GREEN}ps aux | grep tomcat${NC}"
+echo -e "  检查端口监听: ${GREEN}netstat -tuln | grep 8080${NC}"
+echo -e "  查看实时日志: ${GREEN}sudo tail -f /var/lib/${TOMCAT_SERVICE}/logs/catalina.out${NC}"
+echo -e "  检查应用状态: ${GREEN}curl -I http://localhost:8080/guacamole/${NC}"
+
+echo -e "\n${GREEN}祝您使用愉快！如果遇到问题，请按照上述方法逐一排查。${NC}"
