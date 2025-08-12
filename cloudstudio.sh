@@ -1,18 +1,20 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==    Apache Guacamole 透明安装脚本 (v9 - 修正桌面环境启动)                   ==
+# ==  Apache Guacamole 透明安装脚本 (v9.1 - 修复 VNC 启动问题)                  ==
 # ===================================================================================
-# ==  此版本针对 VNC 服务因 'Trace/breakpoint trap' 崩溃的问题，通过创建一个    ==
-# ==  最简化的 xstartup 文件，绕过有冲突的系统会话脚本，确保 XFCE 成功启动。    ==
+# ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
+# ==  此版本修正了 vncserver 因 xstartup 脚本过早退出而导致的 "Trace/breakpoint  ==
+# ==  trap" 或 "cleanly exited too early" 崩溃的问题。核心改动是使用 'exec'    ==
+# ==  命令来确保 XFCE 会话能够持续运行。                                          ==
 # ===================================================================================
 
-# --- (函数部分与之前版本相同) ---
+# --- 函数定义 ---
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
 print_step() { echo -e "\n${BLUE}=======================================================================\n== ${1}\n=======================================================================${NC}"; }
 print_success() { echo -e "${GREEN}[✔] 成功: ${1}${NC}"; }
@@ -20,7 +22,7 @@ print_error() { echo -e "${RED}[✘] 失败: ${1}${NC}\n${RED}脚本已终止。
 print_info() { echo -e "${YELLOW}[i] 信息: ${1}${NC}"; }
 
 check_success() { [ $1 -eq 0 ] && print_success "${2}" || print_error "${2}"; }
-# --- (函数部分结束) ---
+# --- 函数定义结束 ---
 
 
 # --- 脚本主流程开始 ---
@@ -45,7 +47,7 @@ print_step "步骤 1/4：安装 VNC 服务器和 XFCE 桌面"
 sudo apt-get install -y tigervnc-standalone-server xfce4 xfce4-goodies terminator
 check_success $? "安装 VNC 和 XFCE 核心组件"
 
-# ---【核心改进部分 v9】自动设置密码并创建简化的 xstartup 文件 ---
+# ---【核心修正部分 v9.1】自动设置密码并创建正确的 xstartup 文件 ---
 print_info "正在自动生成并设置一个安全的 VNC 密码..."
 VNC_PASS=$(openssl rand -base64 8)
 mkdir -p ~/.vnc
@@ -56,27 +58,30 @@ check_success $? "自动执行 vncpasswd 命令"
 print_success "VNC 密码已自动设置。"
 echo -e "  ${YELLOW}您的 VNC 连接密码是: ${GREEN}${VNC_PASS}${NC} (此密码已自动配置，仅供记录)"
 
-# 创建一个全新的、最小化的 xstartup 文件来避免兼容性问题
-print_info "正在创建简化的 VNC 启动脚本 (xstartup) 以避免桌面环境崩溃..."
+# 创建一个全新的、健壮的 xstartup 文件来确保会话能够持续
+print_info "正在创建优化的 VNC 启动脚本 (xstartup) 以确保桌面环境稳定运行..."
 cat > ~/.vnc/xstartup << EOF
 #!/bin/sh
+
+# 明确指定桌面环境
+export XDG_CURRENT_DESKTOP="XFCE"
 
 # 取消设置任何可能引起冲突的会话变量
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 
-# 启动 XFCE 桌面环境
-startxfce4 &
-
+# 【核心修正】使用 'exec' 命令用 XFCE 会话替换当前的 shell 进程。
+# 这可以防止脚本过早退出，从而保持 VNC 服务持续运行。
+exec startxfce4
 EOF
 # 必须给予执行权限
-chmod 755 ~/.vnc/xstartup
-check_success $? "创建并配置简化的 xstartup 文件"
+chmod +x ~/.vnc/xstartup
+check_success $? "创建并配置优化的 xstartup 文件"
 
 
 # --- 首次启动、诊断和配置流程 (使用经过验证的健壮逻辑) ---
-print_info "正在尝试首次启动 VNC 服务器..."
-# 我们传递 -xstartup 参数确保我们的脚本被使用
+print_info "正在尝试首次启动 VNC 服务器以验证配置..."
+# 我们传递 -xstartup 参数确保我们的新脚本被使用
 vncserver :1 -xstartup ~/.vnc/xstartup
 sleep 4 # 给予更长的启动时间
 
@@ -96,7 +101,7 @@ sleep 1
 print_success "临时 VNC 会话已成功停止。"
 
 print_info "正在以最终配置重新启动 VNC 服务器..."
-# 使用相同的 xstartup 参数重新启动，并允许外部连接
+# 使用相同的 xstartup 参数重新启动，并允许外部连接 (-localhost no)
 vncserver -localhost no :1 -xstartup ~/.vnc/xstartup
 check_success $? "以最终配置重新启动 VNC 服务器"
 sleep 2
@@ -104,13 +109,12 @@ if ! netstat -tuln | grep -q ':5901'; then
     print_error "VNC 服务器端口 5901 未被监听。服务可能启动失败。"
 fi
 print_success "VNC 服务器已在 :1 (端口 5901) 上成功运行并监听。"
-# ---【第一部分核心改进结束】---
+# ---【第一部分核心修正结束】---
 
 
 # ==============================================================================
-# ==  后续步骤与 v8 完全相同，因为所有问题已在第一部分解决               ==
+# ==  后续步骤与之前版本相同，现在应该可以正常工作了                       ==
 # ==============================================================================
-# 为保持脚本完整性，所有部分均予以保留
 
 # 第二部分：安装 guacd (Guacamole 后端)
 print_step "步骤 2/4：编译并安装 Guacamole 后端 (guacd)"
