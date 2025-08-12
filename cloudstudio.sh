@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.4 - 弹性 Tomcat 安装)                   ==
+# ==  Apache Guacamole 透明安装脚本 (v9.5 - 直接脚本重启)                       ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
-# ==  此版本解决了因不同系统软件源缺少特定版本 Tomcat (如 tomcat9) 的问题。     ==
-# ==  脚本现在会自动尝试安装 tomcat10, tomcat9, 或 tomcat8，并兼容重启。        ==
+# ==  此版本修正了在非 systemd 且无 init.d 脚本的环境下无法重启 Tomcat 的问题。 ==
+# ==  现在脚本会回退到直接调用 Tomcat 自带的 startup.sh/shutdown.sh 脚本。      ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -19,7 +19,6 @@ print_step() { echo -e "\n${BLUE}===============================================
 print_success() { echo -e "${GREEN}[✔] 成功: ${1}${NC}"; }
 print_error() { echo -e "${RED}[✘] 失败: ${1}${NC}\n${RED}脚本已终止。请检查上面的错误信息并解决问题后重试。${NC}"; exit 1; }
 print_info() { echo -e "${YELLOW}[i] 信息: ${1}${NC}"; }
-# 【修正】添加缺失的 print_warning 函数
 print_warning() { echo -e "${YELLOW}[!] 警告: ${1}${NC}"; }
 
 check_success() { [ $1 -eq 0 ] && print_success "${2}" || print_error "${2}"; }
@@ -42,7 +41,7 @@ read -p "如果已确认，请按 Enter 键继续..."
 
 
 # ==============================================================================
-# == 第一部分：安装并运行 VNC 服务器 (桌面环境) - (无改动)
+# == 第一部分：安装并运行 VNC 服务器 (桌面环境)
 # ==============================================================================
 print_step "步骤 1/4：安装 VNC 服务器和 XFCE 桌面"
 sudo apt-get install -y tigervnc-standalone-server xfce4 xfce4-goodies terminator
@@ -90,7 +89,7 @@ print_success "VNC 服务器已在 :1 (端口 5901) 上成功运行并监听。"
 
 
 # ==============================================================================
-# == 第二部分：安装 guacd (Guacamole 后端) - (无改动)
+# == 第二部分：安装 guacd (Guacamole 后端)
 # ==============================================================================
 print_step "步骤 2/4：编译并安装 Guacamole 后端 (guacd)"
 GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-bin libossp-uuid-dev libavcodec-dev libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev libssh2-1-dev libvncserver-dev libtelnet-dev libwebsockets-dev libpulse-dev"
@@ -131,11 +130,10 @@ cd ..
 
 
 # ==============================================================================
-# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端) - (核心修正)
+# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
 # ==============================================================================
 print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
 
-# 【核心修正】弹性安装 Tomcat，并设置动态变量
 TOMCAT_VERSION_MAJOR=""
 TOMCAT_SERVICE=""
 TOMCAT_WEBAPPS_DIR=""
@@ -159,7 +157,6 @@ fi
 
 sudo mkdir -p /etc/guacamole && sudo chmod 755 /etc/guacamole
 wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war" -O guacamole.war
-# 使用动态路径变量
 sudo mv guacamole.war "${TOMCAT_WEBAPPS_DIR}"
 check_success $? "部署 .war 文件到 ${TOMCAT_WEBAPPS_DIR}"
 
@@ -184,31 +181,37 @@ sudo bash -c 'cat > /etc/guacamole/user-mapping.xml' << EOF
 </user-mapping>
 EOF
 check_success $? "创建并自动填入所有配置文件"
-# Tomcat 用户通常就是 'tomcat'，与版本无关
 sudo chown tomcat:tomcat /etc/guacamole/ -R
 check_success $? "设置配置文件权限"
 
-# 【核心修正】使用动态服务名，并兼容非 systemd 环境
+# 【核心修正】在非 systemd 环境下，调用 Tomcat 自带的脚本进行重启
 if [ -d /run/systemd/system ]; then
     sudo systemctl restart "${TOMCAT_SERVICE}"
     check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via systemctl)"
 else
-    print_warning "非 systemd 环境，将使用 init.d 脚本重启 Tomcat..."
-    if [ -f "/etc/init.d/${TOMCAT_SERVICE}" ]; then
-        sudo /etc/init.d/"${TOMCAT_SERVICE}" restart
-        check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via init.d)"
+    print_warning "非 systemd 环境，将通过 catalina.sh 脚本直接重启 Tomcat..."
+    TOMCAT_BIN_DIR="/usr/share/${TOMCAT_SERVICE}/bin"
+
+    if [ -f "${TOMCAT_BIN_DIR}/shutdown.sh" ] && [ -f "${TOMCAT_BIN_DIR}/startup.sh" ]; then
+        print_info "正在执行 ${TOMCAT_BIN_DIR}/shutdown.sh..."
+        sudo "${TOMCAT_BIN_DIR}/shutdown.sh" > /dev/null 2>&1
+        sleep 5 # 等待进程关闭
+
+        print_info "正在执行 ${TOMCAT_BIN_DIR}/startup.sh..."
+        sudo "${TOMCAT_BIN_DIR}/startup.sh" > /dev/null 2>&1
+        check_success $? "通过 catalina.sh 脚本启动 Tomcat"
     else
-        print_error "找不到 Tomcat 的 init.d 重启脚本 (/etc/init.d/${TOMCAT_SERVICE})。"
+        print_error "找不到 Tomcat 的启动/关闭脚本 (在 ${TOMCAT_BIN_DIR} 中)。"
     fi
 fi
 
-echo "等待 20 秒让 Guacamole Web 应用完成初始化..."
-sleep 20
+echo "等待 25 秒让 Guacamole Web 应用完成初始化..."
+sleep 25
 HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/guacamole/)
 if [ "$HTTP_CODE" -eq 200 ]; then
     print_success "终极验证通过！Guacamole 登录页面已成功上线 (HTTP Code: $HTTP_CODE)。"
 else
-    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u ${TOMCAT_SERVICE}' 或 'sudo cat /var/log/${TOMCAT_SERVICE}/catalina.out'"
+    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 Tomcat 日志: 'sudo cat /var/log/${TOMCAT_SERVICE}/catalina.*.log'"
 fi
 
 # ==============================================================================
