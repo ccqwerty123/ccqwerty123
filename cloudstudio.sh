@@ -1,11 +1,12 @@
 #!/bin-bash
 
 # ==============================================================================
-# ==    Apache Guacamole 透明安装脚本 (v4 - 完整输出与依赖预检)           ==
+# ==    Apache Guacamole 透明安装脚本 (v5 - 健壮的进程管理)             ==
 # ==============================================================================
-# ==  此版本保留完整安装日志，并为每一步添加了详细的依赖项预检查。        ==
+# ==  此版本增强了 VNC 进程的停止逻辑，以应对 -kill 命令失败的情况。      ==
 # ==============================================================================
 
+# --- (此部分函数与 v4 相同，保持不变) ---
 # --- 设置颜色代码以便输出 ---
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -22,7 +23,6 @@ print_error() { echo -e "${RED}[✘] 失败: ${1}${NC}\n${RED}脚本已终止。
 check_success() { [ $1 -eq 0 ] && print_success "${2}" || print_error "${2}"; }
 
 # --- 依赖项检查函数 ---
-# 参数: 依赖项列表，用空格分隔
 check_dependencies() {
     print_step "正在进行依赖项预检查..."
     local missing_deps=()
@@ -44,15 +44,17 @@ check_dependencies() {
         print_success "所有依赖项均已准备就绪。"
     fi
 }
+# --- (函数部分结束) ---
+
 
 # --- 脚本主流程开始 ---
 print_step "步骤 0/4：环境准备与非交互式配置"
 sudo apt-get update
 check_success $? "更新软件包列表"
 
-echo "正在安装基础工具 (apt-utils)，解决 debconf 警告..."
-sudo apt-get install -y apt-utils
-check_success $? "安装 apt-utils"
+echo "正在安装基础工具 (apt-utils, psmisc)..."
+sudo apt-get install -y apt-utils psmisc # psmisc 提供了 pkill 命令
+check_success $? "安装基础工具"
 
 export DEBIAN_FRONTEND=noninteractive
 check_success $? "设置 DEBIAN_FRONTEND=noninteractive"
@@ -76,13 +78,37 @@ check_success $? "安装 VNC 和 XFCE 核心组件"
 check_dependencies tigervnc-standalone-server xfce4
 
 echo -e "${YELLOW}--- 用户操作：设置 VNC 密码 ---${NC}"
-echo "接下来，您需要设置一个密码，用于 Guacamole 连接到这个虚拟桌面。"
 read -p "理解后，请按 Enter 键开始设置 VNC 密码..."
 vncserver :1
 check_success $? "首次运行 vncserver 以生成配置文件"
 
-vncserver -kill :1 > /dev/null 2>&1
-check_success $? "临时关闭 VNC 会话以进行配置"
+# ---【核心改进部分】健壮地停止 VNC 进程 ---
+echo "等待 VNC 服务完成初始化..."
+sleep 3 # 给予足够的时间创建 PID 文件
+
+if ! vncserver -kill :1 > /dev/null 2>&1; then
+    echo -e "${YELLOW}警告: 'vncserver -kill :1' 命令失败。正在启动备用方案...${NC}"
+    # pkill 会根据进程名的一部分来查找并杀死进程
+    pkill -f "Xtigervnc :1"
+    check_success $? "使用 pkill 备用方案停止 VNC 进程"
+else
+    print_success "'vncserver -kill :1' 命令成功执行"
+fi
+
+# 循环验证进程是否已真正终止
+echo "正在验证 VNC 进程是否已完全停止..."
+WAIT_COUNT=0
+while netstat -tuln | grep -q ':5901' && [ $WAIT_COUNT -lt 10 ]; do
+    sleep 1
+    ((WAIT_COUNT++))
+    echo "  等待端口 5901 释放... (${WAIT_COUNT}/10)"
+done
+
+if netstat -tuln | grep -q ':5901'; then
+    print_error "无法停止 VNC 服务器进程！端口 5901 仍然被占用。"
+fi
+print_success "临时 VNC 会话已成功停止。"
+# ---【核心改进结束】---
 
 [ ! -f ~/.vnc/xstartup ] && print_error "VNC 配置文件 ~/.vnc/xstartup 未找到！"
 echo "startxfce4 &" >> ~/.vnc/xstartup
@@ -99,8 +125,10 @@ print_success "VNC 服务器已在 :1 (端口 5901) 上成功运行并监听。"
 
 
 # ==============================================================================
-# == 第二部分：安装 guacd (Guacamole 后端)
+# ==  后续步骤与 v4 完全相同，因为问题出在第一步。为保持完整性，全部包含。  ==
 # ==============================================================================
+
+# 第二部分：安装 guacd (Guacamole 后端)
 print_step "步骤 2/4：编译并安装 Guacamole 后端 (guacd)"
 GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-bin libossp-uuid-dev libavcodec-dev libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev libssh2-1-dev libvncserver-dev libtelnet-dev libwebsockets-dev libpulse-dev"
 echo "正在安装 guacd 编译所需的所有依赖项..."
@@ -148,9 +176,7 @@ print_success "Guacd 服务已成功运行并监听在端口 4822。"
 cd ..
 
 
-# ==============================================================================
-# == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
-# ==============================================================================
+# 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
 print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
 echo "正在安装 Tomcat 9..."
 sudo apt-get install -y tomcat9
@@ -218,9 +244,7 @@ else
 fi
 
 
-# ==============================================================================
-# == 第四部分：完成
-# ==============================================================================
+# 第四部分：完成
 print_step "步骤 4/4：安装完成！"
 print_success "所有组件已成功安装并配置。"
 echo ""
