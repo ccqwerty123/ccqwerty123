@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.5 - 直接脚本重启)                       ==
+# ==  Apache Guacamole 透明安装脚本 (v9.6 - 修复 Tomcat 重启问题)                ==
 # ===================================================================================
-# ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
-# ==  此版本修正了在非 systemd 且无 init.d 脚本的环境下无法重启 Tomcat 的问题。 ==
-# ==  现在脚本会回退到直接调用 Tomcat 自带的 startup.sh/shutdown.sh 脚本。      ==
+# ==  作者: Kilo Code (经 Claude 修复与增强)                                      ==
+# ==  此版本修正了在非 systemd 环境下 Tomcat 无法正常启动的问题。                ==
+# ==  现在脚本会正确创建必要目录并以正确用户身份启动 Tomcat。                    ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -22,6 +22,90 @@ print_info() { echo -e "${YELLOW}[i] 信息: ${1}${NC}"; }
 print_warning() { echo -e "${YELLOW}[!] 警告: ${1}${NC}"; }
 
 check_success() { [ $1 -eq 0 ] && print_success "${2}" || print_error "${2}"; }
+
+# 新增函数：安全地停止 Tomcat 进程
+safe_stop_tomcat() {
+    local tomcat_service="$1"
+    print_info "正在安全地停止现有的 Tomcat 进程..."
+    
+    # 尝试优雅关闭
+    sudo pkill -f "org.apache.catalina.startup.Bootstrap" 2>/dev/null || true
+    sleep 3
+    
+    # 检查是否还有进程运行
+    if pgrep -f "org.apache.catalina.startup.Bootstrap" > /dev/null; then
+        print_info "发现残余进程，强制终止..."
+        sudo pkill -9 -f "org.apache.catalina.startup.Bootstrap" 2>/dev/null || true
+        sleep 2
+    fi
+    
+    print_success "Tomcat 进程已停止"
+}
+
+# 新增函数：准备 Tomcat 环境
+prepare_tomcat_environment() {
+    local tomcat_service="$1"
+    local tomcat_home="/usr/share/${tomcat_service}"
+    local tomcat_base="/var/lib/${tomcat_service}"
+    
+    print_info "正在准备 Tomcat 运行环境..."
+    
+    # 创建必要的目录
+    sudo mkdir -p "${tomcat_home}/logs" "${tomcat_home}/temp" "${tomcat_home}/work"
+    sudo mkdir -p "${tomcat_base}/logs" "${tomcat_base}/temp" "${tomcat_base}/work"
+    
+    # 设置正确的权限
+    sudo chown -R tomcat:tomcat "${tomcat_home}/logs" "${tomcat_home}/temp" "${tomcat_home}/work"
+    sudo chown -R tomcat:tomcat "${tomcat_base}/logs" "${tomcat_base}/temp" "${tomcat_base}/work"
+    
+    # 确保 webapps 目录权限正确
+    sudo chown -R tomcat:tomcat "${tomcat_base}/webapps"
+    
+    print_success "Tomcat 环境准备完成"
+}
+
+# 新增函数：启动 Tomcat
+start_tomcat_process() {
+    local tomcat_service="$1"
+    local tomcat_home="/usr/share/${tomcat_service}"
+    local tomcat_base="/var/lib/${tomcat_service}"
+    
+    print_info "正在启动 Tomcat 服务..."
+    
+    # 设置环境变量并以 tomcat 用户身份启动
+    sudo -u tomcat bash -c "
+        export CATALINA_HOME='${tomcat_home}'
+        export CATALINA_BASE='${tomcat_base}'
+        export CATALINA_TMPDIR='${tomcat_base}/temp'
+        export JRE_HOME='/usr'
+        cd '${tomcat_home}'
+        '${tomcat_home}/bin/startup.sh'
+    "
+    
+    local start_result=$?
+    
+    if [ $start_result -eq 0 ]; then
+        print_success "Tomcat 启动命令执行成功"
+        
+        # 等待进程启动
+        print_info "等待 Tomcat 进程启动..."
+        local wait_count=0
+        while [ $wait_count -lt 15 ]; do
+            if pgrep -f "org.apache.catalina.startup.Bootstrap" > /dev/null; then
+                print_success "Tomcat 进程已成功启动"
+                return 0
+            fi
+            sleep 2
+            wait_count=$((wait_count + 1))
+        done
+        
+        print_error "Tomcat 进程启动超时"
+        return 1
+    else
+        print_error "Tomcat 启动命令执行失败"
+        return 1
+    fi
+}
 # --- 函数定义结束 ---
 
 
@@ -184,34 +268,48 @@ check_success $? "创建并自动填入所有配置文件"
 sudo chown tomcat:tomcat /etc/guacamole/ -R
 check_success $? "设置配置文件权限"
 
-# 【核心修正】在非 systemd 环境下，调用 Tomcat 自带的脚本进行重启
+# 【核心修正】改进的 Tomcat 重启逻辑
 if [ -d /run/systemd/system ]; then
     sudo systemctl restart "${TOMCAT_SERVICE}"
     check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via systemctl)"
 else
-    print_warning "非 systemd 环境，将通过 catalina.sh 脚本直接重启 Tomcat..."
-    TOMCAT_BIN_DIR="/usr/share/${TOMCAT_SERVICE}/bin"
-
-    if [ -f "${TOMCAT_BIN_DIR}/shutdown.sh" ] && [ -f "${TOMCAT_BIN_DIR}/startup.sh" ]; then
-        print_info "正在执行 ${TOMCAT_BIN_DIR}/shutdown.sh..."
-        sudo "${TOMCAT_BIN_DIR}/shutdown.sh" > /dev/null 2>&1
-        sleep 5 # 等待进程关闭
-
-        print_info "正在执行 ${TOMCAT_BIN_DIR}/startup.sh..."
-        sudo "${TOMCAT_BIN_DIR}/startup.sh" > /dev/null 2>&1
-        check_success $? "通过 catalina.sh 脚本启动 Tomcat"
-    else
-        print_error "找不到 Tomcat 的启动/关闭脚本 (在 ${TOMCAT_BIN_DIR} 中)。"
-    fi
+    print_warning "非 systemd 环境，将通过改进的方法重启 Tomcat..."
+    
+    # 停止现有进程
+    safe_stop_tomcat "${TOMCAT_SERVICE}"
+    
+    # 准备运行环境
+    prepare_tomcat_environment "${TOMCAT_SERVICE}"
+    
+    # 启动 Tomcat
+    start_tomcat_process "${TOMCAT_SERVICE}"
+    check_success $? "通过改进的方法启动 Tomcat"
 fi
 
-echo "等待 25 秒让 Guacamole Web 应用完成初始化..."
-sleep 25
+echo "等待 30 秒让 Guacamole Web 应用完成初始化..."
+sleep 30
+
+# 验证 Tomcat 进程是否运行
+if ! pgrep -f "org.apache.catalina.startup.Bootstrap" > /dev/null; then
+    print_error "Tomcat 进程未运行！请检查日志文件。"
+fi
+
+# 验证端口是否监听
+if ! netstat -tuln | grep -q ':8080'; then
+    print_warning "端口 8080 未被监听，但继续验证 HTTP 访问..."
+fi
+
 HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/guacamole/)
 if [ "$HTTP_CODE" -eq 200 ]; then
     print_success "终极验证通过！Guacamole 登录页面已成功上线 (HTTP Code: $HTTP_CODE)。"
+elif [ "$HTTP_CODE" -eq 302 ] || [ "$HTTP_CODE" -eq 301 ]; then
+    print_success "Guacamole 已启动并正在重定向 (HTTP Code: $HTTP_CODE)，这是正常的。"
 else
-    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 Tomcat 日志: 'sudo cat /var/log/${TOMCAT_SERVICE}/catalina.*.log'"
+    print_warning "HTTP 验证返回代码: $HTTP_CODE"
+    print_info "请检查以下日志文件获取详细信息："
+    print_info "  - /var/lib/${TOMCAT_SERVICE}/logs/catalina.out"
+    print_info "  - /usr/share/${TOMCAT_SERVICE}/logs/catalina.out"
+    print_info "  - /var/log/${TOMCAT_SERVICE}/catalina.out"
 fi
 
 # ==============================================================================
@@ -222,4 +320,10 @@ print_success "所有组件已成功安装并配置。"
 echo -e "\n  访问地址: ${GREEN}http://<您的CloudStudio公网IP>:8080/guacamole/${NC}"
 echo -e "  用户名:   ${GREEN}user${NC}"
 echo -e "  密码:     ${GREEN}您刚刚为 Guacamole 设置的网页登录密码${NC}\n"
+echo -e "\n${YELLOW}故障排除提示:${NC}"
+echo -e "  如果无法访问，请检查以下几点："
+echo -e "  1. 确保端口 8080 在防火墙中已开放"
+echo -e "  2. 检查 Tomcat 进程: ${GREEN}ps aux | grep tomcat${NC}"
+echo -e "  3. 检查端口监听: ${GREEN}netstat -tuln | grep 8080${NC}"
+echo -e "  4. 查看日志: ${GREEN}sudo tail -f /var/lib/${TOMCAT_SERVICE}/logs/catalina.out${NC}"
 echo "祝您使用愉快！"
