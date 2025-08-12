@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.2 - 修复下载链接)                       ==
+# ==  Apache Guacamole 透明安装脚本 (v9.3 - 兼容非 systemd 环境)                ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini 修复与增强)                                      ==
-# ==  此版本修正了因使用 Apache 动态镜像链接 (closer.lua) 导致 wget 下载到     ==
-# ==  HTML 页面而非实际文件的问题。现已更换为稳定的 CDN 直接下载链接。            ==
+# ==  此版本修正了在 Docker/容器等非 systemd 环境下，因无法使用 systemctl       ==
+# ==  命令而导致的 guacd 启动失败问题。脚本现在会自动检测环境并回退到直接      ==
+# ==  启动 guacd 进程的方式。                                                     ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -55,7 +56,7 @@ check_success $? "自动执行 vncpasswd 命令"
 print_success "VNC 密码已自动设置。"
 echo -e "  ${YELLOW}您的 VNC 连接密码是: ${GREEN}${VNC_PASS}${NC} (此密码已自动配置，仅供记录)"
 
-print_info "正在创建优化的 VNC 启动脚本 (xstartup) 以确保桌面环境稳定运行..."
+print_info "正在创建优化的 VNC 启动脚本 (xstartup)..."
 cat > ~/.vnc/xstartup << EOF
 #!/bin/sh
 export XDG_CURRENT_DESKTOP="XFCE"
@@ -79,7 +80,7 @@ if ! pgrep -f "Xtigervnc :1" > /dev/null; then
     fi
     exit 1
 fi
-print_success "VNC 服务已成功临时启动，现在将停止它以进行最终配置。"
+print_success "VNC 服务已成功临时启动。"
 
 vncserver -kill :1 > /dev/null 2>&1 || pkill -f "Xtigervnc :1"
 sleep 1
@@ -103,8 +104,7 @@ GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-
 sudo apt-get install -y $GUACD_DEPS
 check_success $? "安装 guacd 编译依赖项"
 
-GUAC_VERSION="1.5.3" # 您可以按需更改版本
-# 【核心修正】使用 Apache 的 CDN 直接下载链接，而不是动态选择器页面
+GUAC_VERSION="1.5.3"
 wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz" -O guacamole-server.tar.gz
 check_success $? "下载 Guacamole 源代码"
 tar -xzf guacamole-server.tar.gz
@@ -118,11 +118,27 @@ sudo make install
 check_success $? "安装编译好的文件 (make install)"
 sudo ldconfig
 check_success $? "更新动态链接库缓存"
-sudo systemctl enable guacd && sudo systemctl start guacd
-check_success $? "启动并设置 guacd 服务开机自启"
-sleep 2
-sudo systemctl is-active --quiet guacd
-check_success $? "确认 guacd 服务正在后台运行"
+
+# 【核心修正】检测环境是否支持 systemd，如果不支持则直接启动 guacd 进程
+if [ -d /run/systemd/system ]; then
+    print_info "检测到 systemd 环境，使用 systemctl 启动 guacd..."
+    sudo systemctl enable guacd && sudo systemctl start guacd
+    check_success $? "启动并设置 guacd 服务开机自启"
+    sleep 2
+    sudo systemctl is-active --quiet guacd
+    check_success $? "确认 guacd 服务正在后台运行 (via systemctl)"
+else
+    print_warning "未检测到 systemd 环境 (常见于 Docker/容器)。"
+    print_info "将直接启动 guacd 守护进程..."
+    # 直接运行可执行文件，它会自动作为守护进程在后台运行
+    sudo /usr/local/sbin/guacd
+    check_success $? "直接执行 guacd 命令"
+    sleep 2
+    # 使用 pgrep 检查进程是否存在
+    pgrep guacd > /dev/null
+    check_success $? "确认 guacd 进程正在后台运行 (via pgrep)"
+fi
+
 cd ..
 
 
@@ -133,7 +149,6 @@ print_step "步骤 3/4：安装 Tomcat 并自动化配置 Guacamole"
 sudo apt-get install -y tomcat9
 check_success $? "安装 Tomcat 9"
 sudo mkdir -p /etc/guacamole && sudo chmod 755 /etc/guacamole
-# 【核心修正】同样使用 CDN 直接下载链接下载 .war 文件
 wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war" -O guacamole.war
 sudo mv guacamole.war /var/lib/tomcat9/webapps/
 check_success $? "部署 .war 文件到 Tomcat"
@@ -169,7 +184,7 @@ HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" http://localhost:8080/guac
 if [ "$HTTP_CODE" -eq 200 ]; then
     print_success "终极验证通过！Guacamole 登录页面已成功上线 (HTTP Code: $HTTP_CODE)。"
 else
-    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u tomcat9'"
+    print_error "终极验证失败！无法访问 Guacamole (HTTP Code: $HTTP_CODE)。请检查 'sudo journalctl -u tomcat9' 或 'sudo cat /var/log/tomcat9/catalina.out'"
 fi
 
 # ==============================================================================
