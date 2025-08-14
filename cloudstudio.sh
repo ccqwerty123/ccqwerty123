@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V2 - 修复权限问题)
+# 脚本名称: install_webrtc_screen.sh (V3 - 修复Go依赖问题)
 # 功能描述: 在已具备 XFCE/VNC 环境下，自动安装并配置 webrtc-remote-screen
 # ==============================================================================
 #
@@ -102,7 +102,7 @@ if ! command -v go &> /dev/null; then
     info "Go 环境未找到，现在开始自动安装..."
     GO_VERSION="1.21.0"
     GO_FILENAME="go${GO_VERSION}.linux-amd64.tar.gz"
-    GO_TEMP_PATH="/tmp/$GO_FILENAME" # 【修正】使用 /tmp 目录进行下载
+    GO_TEMP_PATH="/tmp/$GO_FILENAME"
     DOWNLOAD_URL="https://golang.org/dl/$GO_FILENAME"
     
     info "正在从 $DOWNLOAD_URL 下载 Go 到 $GO_TEMP_PATH..."
@@ -138,6 +138,11 @@ cd "$INSTALL_DIR"
 info "正在从 GitHub 克隆源码..."
 git clone https://github.com/rviscarra/webrtc-remote-screen.git source
 cd source
+
+# 【【【 修正步骤 】】】
+info "正在修复和同步 Go 模块依赖..."
+go mod tidy
+success "依赖修复完成。"
 
 info "开始编译程序 (这可能需要几分钟)..."
 if make; then
