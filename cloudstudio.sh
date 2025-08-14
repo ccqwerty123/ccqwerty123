@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V5 - 无中断版)
+# 脚本名称: install_webrtc_screen.sh (V6 - 修复C语言链接错误)
 # 功能描述: 在已具备 XFCE/VNC 环境下，全自动安装 webrtc-remote-screen。
-#           如果检测到旧的安装，会自动删除并重装。
 # ==============================================================================
 
 # --- 配置区 ---
@@ -122,12 +121,15 @@ info "正在修复和同步 Go 模块依赖..."
 go mod tidy
 success "依赖修复完成。"
 
+# 【【【 核心修正 】】】
 info "开始编译程序 (这可能需要几分钟)..."
-if make; then
+# 添加 CGO_LDFLAGS="-lm" 以链接数学库
+if CGO_LDFLAGS="-lm" make; then
     success "程序编译成功。"
 else
     error "编译失败！请检查上面的错误信息。"
 fi
+
 chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
 [ ! -f "$INSTALL_DIR/agent" ] && error "未找到编译产物 'agent'，安装失败。"
 success "webrtc-remote-screen 已成功安装到 $INSTALL_DIR"
