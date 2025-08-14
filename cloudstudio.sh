@@ -1,6 +1,144 @@
 #!/bin/bash
 
 # ==============================================================================
+# 脚本名称: install_webrtc_screen.sh (V8 - 终极修复增强版)
+# 功能描述: 在已具备 XFCE/VNC 环境下，全自动安装 webrtc-remote-screen。
+#           采用更新依赖、强制注入环境变量等多种手段，解决顽固的C语言链接错误。
+# ==============================================================================
+
+# --- 配置区 ---
+INSTALL_DIR="$HOME/webrtc-remote-screen" # 程序安装目录
+SERVICE_USER="$USER"                     # 运行服务的用户名 (通常无需修改)
+AGENT_PORT="9000"                        # Web访问端口
+
+# ############################################################################ #
+# ##                                                                        ## #
+# ##  【【【 请务必修改此项! 】】】                                           ## #
+# ##  在您的 VNC 桌面中打开终端，运行 `echo $DISPLAY` 命令查看此值。          ## #
+# ##  通常它的值是 :1 或 :2。                                                 ## #
+# ##                                                                        ## #
+   DISPLAY_SESSION=":1"
+# ##                                                                        ## #
+# ############################################################################ #
+
+
+# --- 脚本初始化 ---
+set -e
+set -o pipefail
+
+# --- 美化输出 ---
+C_RESET='\033[0m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[0;33m'
+C_BLUE='\033[0;34m'
+
+info() { echo -e "${C_BLUE}[信息]${C_RESET} $1"; }
+success() { echo -e "${C_GREEN}[成功]${C_RESET} $1"; }
+warn() { echo -e "${C_YELLOW}[警告]${C_RESET} $1"; }
+error() { echo -e "${C_RED}[错误]${C_RESET} $1"; exit 1; }
+
+# --- 主程序 ---
+
+# 步骤 1: 权限和配置检查
+info "检查运行环境和配置..."
+if [[ $EUID -eq 0 ]]; then
+   error "请不要使用 root 用户运行此脚本。请切换到拥有 sudo 权限的普通用户。"
+fi
+if ! sudo -v; then
+    error "无法获取 sudo 权限。请确保当前用户在 sudoers 列表中。"
+fi
+if [[ -z "$DISPLAY_SESSION" ]]; then
+    error "关键配置 DISPLAY_SESSION 为空！请编辑脚本并设置正确的值 (如 ':1')。"
+fi
+success "环境检查通过。"
+
+# 步骤 2: 清理和准备安装目录 (无中断)
+info "检查并准备安装目录: $INSTALL_DIR"
+if [ -d "$INSTALL_DIR" ]; then
+    warn "检测到已存在的安装目录。将自动执行清理并重新安装。"
+    sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
+    sudo systemctl disable webrtc-remote-screen.service >/dev/null 2>&1 || true
+    sudo rm -f /etc/systemd/system/webrtc-remote-screen.service >/dev/null 2>&1 || true
+    rm -rf "$INSTALL_DIR"
+    success "旧目录已清理。"
+fi
+mkdir -p "$INSTALL_DIR"
+info "安装目录准备就绪。"
+
+# 步骤 3: 安装编译依赖
+info "准备安装编译依赖..."
+if [ -f /etc/debian_version ]; then
+    PKG_MANAGER="apt-get"
+    DEPS="git make gcc libx11-dev libx264-dev screen"
+    info "检测到 Debian/Ubuntu 系统。"
+elif [ -f /etc/redhat-release ]; then
+    PKG_MANAGER="yum"
+    if command -v dnf &> /dev/null; then PKG_MANAGER="dnf"; fi
+    DEPS="git make gcc libX11-devel xz libx264-devel screen"
+    info "检测到 CentOS/RHEL 系统。"
+else
+    error "无法识别的操作系统，脚本无法继续。"
+fi
+
+info "正在更新软件包列表 (需要sudo权限)..."
+sudo $PKG_MANAGER update -y >/dev/null 2>&1
+info "正在安装依赖包: $DEPS..."
+sudo $PKG_MANAGER install -y $DEPS
+
+# 步骤 4: 安装 Go 语言环境
+if ! command -v go &> /dev/null; then
+    info "Go 环境未找到，现在开始自动安装..."
+    GO_VERSION="1.21.0"
+    GO_FILENAME="go${GO_VERSION}.linux-amd64.tar.gz"
+    GO_TEMP_PATH="/tmp/$GO_FILENAME"
+    DOWNLOAD_URL="https://golang.org/dl/$GO_FILENAME"
+    info "正在从 $DOWNLOAD_URL 下载 Go 到 $GO_TEMP_PATH..."
+    wget --quiet --continue -O "$GO_TEMP_PATH" "$DOWNLOAD_URL"
+    [ ! -f "$GO_TEMP_PATH" ] && error "Go 安装包下载失败！"
+    info "正在解压并安装 Go 到 /usr/local/go (需要sudo权限)..."
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "$GO_TEMP_PATH"
+    info "正在清理临时文件: $GO_TEMP_PATH"
+    rm "$GO_TEMP_PATH"
+    export PATH=$PATH:/usr/local/go/bin
+    if ! grep -q "/usr/local/go/bin" "$HOME/.profile"; then
+        echo -e '\n# Go Language Path\nexport PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
+    fi
+    success "Go 安装完成。"
+    warn "为使 Go 命令在新的终端中生效，您可能需要重新登录或执行 'source ~/.profile'。"
+else
+    success "检测到已安装的 Go 环境。"
+fi
+export PATH=$PATH:/usr/local/go/bin
+
+# 步骤 5: 克隆并编译 webrtc-remote-screen
+info "准备下载和编译 webrtc-remote-screen..."
+cd "$INSTALL_DIR"
+info "正在从 GitHub 克隆源码..."
+git clone https://github.com/rviscarra/webrtc-remote-screen.git .
+
+# 【【【 核心修正 V8 】】】
+info "清理 Go 模块缓存以确保环境干净..."
+go clean -modcache
+
+info "尝试更新底层CGO依赖包以解决潜在的兼容性问题..."
+go get -u github.com/gen2brain/x264-go || warn "依赖更新失败，将继续尝试编译..."
+go mod tidy
+success "依赖修复完成。"
+
+info "开始编译程序 (使用终极修复策略)..."
+# 使用 export 强制注入 CGO 环境变量，这是最强力的注入方式
+export CGO_CFLAGS="-std=gnu99"
+export CGO_LDFLAGS="-lm"
+
+# 直接调用 go build，这是最可靠的执行方式
+if go build -tags "h264enc" -o agent cmd/agent.go; then
+    success "程序编译成功。"
+else
+    #!/bin/bash
+
+# ==============================================================================
 # 脚本名称: install_webrtc_screen.sh (V7 - 终极链接修复版)
 # 功能描述: 在已具备 XFCE/VNC 环境下，全自动安装 webrtc-remote-screen。
 #           使用 go build 的 -ldflags 参数直接注入链接器标志，绕过 make。
