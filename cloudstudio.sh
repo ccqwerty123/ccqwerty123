@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V6 - 修复C语言链接错误)
+# 脚本名称: install_webrtc_screen.sh (V7 - 终极链接修复版)
 # 功能描述: 在已具备 XFCE/VNC 环境下，全自动安装 webrtc-remote-screen。
+#           使用 go build 的 -ldflags 参数直接注入链接器标志，绕过 make。
 # ==============================================================================
 
 # --- 配置区 ---
@@ -121,10 +122,10 @@ info "正在修复和同步 Go 模块依赖..."
 go mod tidy
 success "依赖修复完成。"
 
-# 【【【 核心修正 】】】
+# 【【【 核心修正 V7 】】】
 info "开始编译程序 (这可能需要几分钟)..."
-# 添加 CGO_LDFLAGS="-lm" 以链接数学库
-if CGO_LDFLAGS="-lm" make; then
+# 不再使用 make，直接调用 go build 并使用 -ldflags 注入链接器参数 -lm
+if go build -tags "h264enc" -ldflags '-extldflags "-lm"' -o agent cmd/agent.go; then
     success "程序编译成功。"
 else
     error "编译失败！请检查上面的错误信息。"
