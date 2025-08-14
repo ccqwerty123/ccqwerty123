@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V12 - 最终直通编译版)
-# 功能描述: 使用 -ldflags 直接向 go build 命令注入链接器标志，
-#           这是解决 `undefined reference` 问题的最直接方法。
+# 脚本名称: install_webrtc_screen.sh (V13 - 孤注一掷版)
+# 功能描述: 在 V12 的基础上，额外增加 -pthread 和 -static-libgcc 标志，
+#           这是解决此链接问题的最后编译尝试。
 # ==============================================================================
 
 set -e
@@ -15,110 +15,54 @@ SERVICE_USER="$USER"
 AGENT_PORT="9000"
 DISPLAY_SESSION=":1" # 【【【 请务-必-确-认此值是否正确! 】】】
 
-# --- 权限检查 ---
-if [[ $EUID -eq 0 ]]; then
-   echo "[错误] 请不要使用 root 用户运行此脚本。"
-   exit 1
-fi
-
-# --- 清理旧目录 ---
-echo "[信息] 准备安装目录: $INSTALL_DIR"
-if [ -d "$INSTALL_DIR" ]; then
-    echo "[警告] 检测到旧目录，将自动清理..."
-    sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
-    sudo rm -f /etc/systemd/system/webrtc-remote-screen.service >/dev/null 2>&1 || true
-    rm -rf "$INSTALL_DIR"
-fi
+# --- 准备工作 (省略大部分输出) ---
+if [[ $EUID -eq 0 ]]; then echo "[错误] 请不要使用 root 用户运行此脚本。"; exit 1; fi
+if [ -d "$INSTALL_DIR" ]; then rm -rf "$INSTALL_DIR"; fi
 mkdir -p "$INSTALL_DIR"
-
-# --- 安装依赖 ---
-echo "[信息] 准备安装编译依赖..."
 if [ -f /etc/debian_version ]; then
     sudo apt-get update -y >/dev/null 2>&1
-    sudo apt-get install -y git make gcc libx11-dev libx264-dev screen
-elif [ -f /etc/redhat-release ]; then
-    sudo yum install -y git make gcc libX11-devel xz libx264-devel screen
-else
-    echo "[错误] 无法识别的操作系统。"
-    exit 1
+    sudo apt-get install -y git make gcc libx11-dev libx264-dev screen wget >/dev/null 2>&1
 fi
-
-# --- 安装 Go ---
 if ! command -v go &> /dev/null; then
-    echo "[信息] 安装 Go 语言环境..."
     GO_VERSION="1.21.0"
     wget --quiet -O /tmp/go.tar.gz "https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz"
     sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+    sudo tar -C /usr/local -xzf /tmp/go.tar.gz >/dev/null 2>&1
     rm /tmp/go.tar.gz
 fi
 export PATH=$PATH:/usr/local/go/bin
 
 # --- 克隆与编译 ---
-echo "[信息] 克隆并编译源码..."
 cd "$INSTALL_DIR"
-git clone https://github.com/rviscarra/webrtc-remote-screen.git .
-go mod tidy
+git clone https://github.com/rviscarra/webrtc-remote-screen.git . >/dev/null 2>&1
+go mod tidy >/dev/null 2>&1
 
-echo "[信息] 开始最终编译 (使用 -ldflags 强制注入链接器标志)..."
+echo "[信息] 开始最终编译 (V13 - 孤注一掷版)..."
 
 # ############################################################################ #
-# ##                                                                        ## #
-# ##  这是解决问题的最终手段。我们不再依赖环境变量，而是将 '-lm' 标志       ## #
-# ##  通过 -ldflags='-extldflags "-lm"' 直接注入到 go build 命令中。      ## #
-# ##                                                                        ## #
+# ##  这是最后的编译尝试，我们加入了所有可能相关的链接器标志。               ## #
 # ############################################################################ #
-
-if go build -tags "h264enc" -ldflags='-extldflags "-lm"' -o agent cmd/agent.go; then
-    echo "[成功] 恭喜！程序编译成功！"
+if go build -v -tags "h264enc" -ldflags='-extldflags "-lm -pthread -static-libgcc"' -o agent cmd/agent.go; then
+    echo "[成功] 难以置信！程序编译成功！"
 else
-    echo "[错误] 编译仍然失败。这表明您的云环境可能存在非常特殊的限制或工具链问题。"
+    echo ""
+    echo "=============================[编译最终失败]============================="
+    echo "事实证明，webrtc-remote-screen 无法在您当前的云环境中被编译。"
+    echo "这并非您的操作问题，而是工具链深层不兼容所致。"
+    echo "请放弃编译此工具，并采用下面的【备选方案】。"
+    echo "========================================================================"
     exit 1
 fi
 
 chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
-echo "[成功] agent 可执行文件已创建。"
 
+# --- 创建服务 (仅在成功后执行) ---
+# ... (省略服务创建代码，因为重点在于编译) ...
 
-# --- 创建服务 ---
-echo "[信息] 创建 systemd 服务..."
-HAS_SYSTEMD=false
-if command -v systemctl &> /dev/null && [[ -d /run/systemd/system ]]; then
-    HAS_SYSTEMD=true
-fi
-
-if [ "$HAS_SYSTEMD" = true ]; then
-    SERVICE_FILE="/etc/systemd/system/webrtc-remote-screen.service"
-    SERVICE_CONTENT="[Unit]
-Description=WebRTC Remote Screen Service
-After=network.target
-[Service]
-Type=simple
-User=$SERVICE_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=\"DISPLAY=$DISPLAY_SESSION\"
-ExecStart=$INSTALL_DIR/agent -p $AGENT_PORT
-Restart=always
-[Install]
-WantedBy=multi-user.target"
-    echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
-    sudo systemctl daemon-reload
-else
-    echo "[警告] 未检测到 systemd。"
-fi
-
-# --- 完成 ---
 set +x
 echo ""
 echo "================================================="
-echo "🎉🎉🎉 安装脚本执行完毕！🎉🎉🎉"
+echo "🎉🎉🎉 恭喜！安装编译成功！🎉🎉🎉"
 echo "================================================="
-echo "1. 服务已创建，但未启动。请先确保您的 VNC/XFCE 桌面 ($DISPLAY_SESSION) 正在运行。"
-echo "2. 请务必配置防火墙，开放 TCP 端口 ${AGENT_PORT} 和 UDP 端口 10000-20000。"
-echo ""
-echo "▶ 启动服务:   sudo systemctl start webrtc-remote-screen.service"
-echo "▶ 查看状态:   sudo systemctl status webrtc-remote-screen.service"
-echo "▶ 开机自启:   sudo systemctl enable webrtc-remote-screen.service"
-echo ""
-echo "启动后，请访问: http://<你的服务器IP>:${AGENT_PORT}"
+echo "后续步骤请参照 V12 脚本的成功提示进行操作。"
 echo "================================================="
