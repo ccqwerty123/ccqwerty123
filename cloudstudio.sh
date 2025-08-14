@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.9 - Tomcat 日志目录修复版)               ==
+# ==  Apache Guacamole 透明安装脚本 (v10.0 - 诊断优先修复版)                      ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini AI 重构与增强)                                  ==
-# ==  此版本修复了在非 systemd 环境下手动启动 Tomcat 时，因 /logs 目录缺失      ==
-# ==  而导致的启动失败问题。脚本现在会自动创建该目录并设置正确权限。            ==
+# ==  此版本修复了验证失败时脚本会提前退出的致命逻辑错误。                      ==
+# ==  现在，无论验证是否成功，脚本都会保证执行最终的详细诊断报告，以便排查问题。==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -80,7 +80,7 @@ chmod +x ~/.vnc/xstartup
 check_success $? "创建并配置优化的 xstartup 文件"
 
 print_info "正在启动 VNC 服务器..."
-vncserver -kill :1 >/dev/null 2>&1 && sleep 1
+vncserver -kill :1 >/dev/null 2_1 && sleep 1
 vncserver :1 -localhost no
 check_success $? "启动 VNC 服务器 (:1)"
 
@@ -188,32 +188,28 @@ if [ -d /run/systemd/system ]; then
     check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via systemctl)"
 else
     print_warning "非 systemd 环境，正在手动重启 Tomcat..."
-    sudo pkill -9 -f "org.apache.catalina.startup.Bootstrap" || true
-    sleep 3
-    
-    # 【关键修复 v9.9】确保 logs 目录存在且权限正确
+    sudo pkill -9 -f "org.apache.catalina.startup.Bootstrap" || true; sleep 3
     print_info "正在检查并创建 Tomcat 日志目录（如果需要）..."
-    sudo mkdir -p "${TOMCAT_HOME}/logs"
-    check_success $? "创建 Tomcat 日志目录"
-    sudo chown -R ${TOMCAT_USER}:${TOMCAT_USER} "${TOMCAT_HOME}/logs"
-    check_success $? "设置 Tomcat 日志目录所有者"
-
+    sudo mkdir -p "${TOMCAT_HOME}/logs" && sudo chown -R ${TOMCAT_USER}:${TOMCAT_USER} "${TOMCAT_HOME}/logs"
+    check_success $? "创建并配置 Tomcat 日志目录"
     sudo -u ${TOMCAT_USER} ${TOMCAT_HOME}/bin/startup.sh
     check_success $? "手动启动 Tomcat 进程"
 fi
 
 # ==============================================================================
-# == 第四部分：验证部署与自动修复
+# == 第四部分：验证部署状态 (不会在此处终止)
 # ==============================================================================
 print_step "步骤 4/5：验证 Guacamole Web 应用部署状态"
-print_info "等待最多 60 秒，让 Tomcat 初始化 Guacamole 应用..."
-SUCCESS=false
+DEPLOYMENT_SUCCESS=false
 URL_PATH="/guacamole/"
+
+print_info "首次尝试: 等待最多 60 秒，让 Tomcat 在 /guacamole/ 初始化..."
 for i in {1..12}; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080${URL_PATH})
+    # 使用 --connect-timeout 确保快速失败，-f 使其在 HTTP 错误时不输出内容
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:8080${URL_PATH})
     if [ "$HTTP_CODE" -eq 200 ]; then
-        print_success "验证成功！Guacamole 登录页面已在 ${URL_PATH} 上线 (HTTP 200)。"
-        SUCCESS=true
+        print_success "验证成功！Guacamole 登录页面已在 ${URL_PATH} 上线。"
+        DEPLOYMENT_SUCCESS=true
         break
     else
         echo -n "."
@@ -221,9 +217,9 @@ for i in {1..12}; do
     fi
 done
 
-if [ "$SUCCESS" = false ]; then
+if [ "$DEPLOYMENT_SUCCESS" = false ]; then
     print_warning "在 ${URL_PATH} 路径验证失败 (最后状态码: $HTTP_CODE)。"
-    print_info "正在尝试将 Guacamole 部署为 ROOT 应用 (通过根路径 / 访问)..."
+    print_info "二次尝试: 将 Guacamole 部署为 ROOT 应用 (通过根路径 / 访问)..."
     URL_PATH="/"
     sudo rm -rf "${TOMCAT_WEBAPPS_DIR}/ROOT"
     sudo cp "${TOMCAT_WEBAPPS_DIR}/guacamole.war" "${TOMCAT_WEBAPPS_DIR}/ROOT.war"
@@ -233,43 +229,44 @@ if [ "$SUCCESS" = false ]; then
     check_success $? "重启 Tomcat 服务"
     print_info "等待最多 45 秒让 ROOT 应用初始化..."
     for i in {1..9}; do
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080${URL_PATH})
-        if [ "$HTTP_CODE" -eq 200 ]; then print_success "验证成功！Guacamole 已作为 ROOT 应用成功部署 (HTTP 200)。"; SUCCESS=true; break; fi
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:8080${URL_PATH})
+        if [ "$HTTP_CODE" -eq 200 ]; then print_success "验证成功！Guacamole 已作为 ROOT 应用成功部署。"; DEPLOYMENT_SUCCESS=true; break; fi
         echo -n "."; sleep 5;
     done
-fi
-
-if [ "$SUCCESS" = false ]; then
-    print_error "所有自动部署尝试均失败。请查看下方的详细诊断信息进行手动排查。"
+    if [ "$DEPLOYMENT_SUCCESS" = false ]; then
+        print_warning "作为 ROOT 应用的二次部署尝试也失败了 (最后状态码: $HTTP_CODE)。"
+    fi
 fi
 
 # ==============================================================================
-# == 第五部分：完成与超级详细的诊断信息
+# == 第五部分：最终报告与诊断 (现在总会执行)
 # ==============================================================================
 print_step "步骤 5/5：安装完成！最终诊断报告"
 
-FINAL_URL="http://<您的公网IP>:8080${URL_PATH}"
-
-print_success "Guacamole 环境已安装和配置完毕。"
-echo -e "\n${BLUE}========================= 访问凭据 ==========================${NC}"
-echo -e "  ${YELLOW}Guacamole URL: ${GREEN}${FINAL_URL}${NC}"
-echo -e "  ${YELLOW}用户名:          ${GREEN}guacadmin${NC}"
-echo -e "  ${YELLOW}密码:            ${GREEN}${GUAC_PASS}${NC}"
-echo -e "  ${YELLOW}(内部) VNC 密码: ${GREEN}${VNC_PASS}${NC} (已在 Guacamole 中自动配置)"
-echo -e "${BLUE}=============================================================${NC}"
+if [ "$DEPLOYMENT_SUCCESS" = true ]; then
+    FINAL_URL="http://<您的公网IP>:8080${URL_PATH}"
+    print_success "Guacamole 环境已安装和配置完毕。"
+    echo -e "\n${BLUE}========================= 访问凭据 ==========================${NC}"
+    echo -e "  ${YELLOW}Guacamole URL: ${GREEN}${FINAL_URL}${NC}"
+    echo -e "  ${YELLOW}用户名:          ${GREEN}guacadmin${NC}"
+    echo -e "  ${YELLOW}密码:            ${GREEN}${GUAC_PASS}${NC}"
+    echo -e "${BLUE}=============================================================${NC}"
+else
+    print_error "自动化部署验证失败！请仔细检查下面的诊断信息以找出问题根源。"
+fi
 
 echo -e "\n${BLUE}======================= 详细诊断检查 ==========================${NC}"
 # 1. 进程检查
 echo -e "${YELLOW}--- 1. 核心进程状态 ---${NC}"
-pgrep -fl guacd && print_success "Guacamole 后端 (guacd) 正在运行。" || print_error "Guacamole 后端 (guacd) 未运行！"
-pgrep -f "Xtigervnc :1" && print_success "VNC 服务器 (Xtigervnc) 正在运行。" || print_error "VNC 服务器 (Xtigervnc) 未运行！"
-pgrep -f "org.apache.catalina.startup.Bootstrap" && print_success "Tomcat 服务器 (Java) 正在运行。" || print_error "Tomcat 服务器 (Java) 未运行！"
+pgrep -fl guacd && print_success "Guacamole 后端 (guacd) 正在运行。" || print_warning "Guacamole 后端 (guacd) 未运行！"
+pgrep -f "Xtigervnc :1" && print_success "VNC 服务器 (Xtigervnc) 正在运行。" || print_warning "VNC 服务器 (Xtigervnc) 未运行！"
+pgrep -f "org.apache.catalina.startup.Bootstrap" && print_success "Tomcat 服务器 (Java) 正在运行。" || print_warning "Tomcat 服务器 (Java) 未运行！"
 
 # 2. 端口检查
 echo -e "\n${YELLOW}--- 2. 网络端口监听状态 ---${NC}"
-netstat -tuln | grep -q ':8080' && print_success "端口 8080 (Tomcat) 正在监听。" || print_error "端口 8080 (Tomcat) 未监听！"
-netstat -tuln | grep -q ':5901' && print_success "端口 5901 (VNC) 正在监听。" || print_error "端口 5901 (VNC) 未监听！"
-netstat -tuln | grep -q ':4822' && print_success "端口 4822 (guacd) 正在监听。" || print_error "端口 4822 (guacd) 未监听！"
+netstat -tuln | grep -q ':8080' && print_success "端口 8080 (Tomcat) 正在监听。" || print_warning "端口 8080 (Tomcat) 未监听！"
+netstat -tuln | grep -q ':5901' && print_success "端口 5901 (VNC) 正在监听。" || print_warning "端口 5901 (VNC) 未监听！"
+netstat -tuln | grep -q ':4822' && print_success "端口 4822 (guacd) 正在监听。" || print_warning "端口 4822 (guacd) 未监听！"
 
 # 3. 文件系统和权限检查
 echo -e "\n${YELLOW}--- 3. 文件系统与权限检查 ---${NC}"
@@ -277,13 +274,13 @@ if [ -d /etc/guacamole ]; then
     print_success "配置目录 /etc/guacamole 存在。"
     ls -ld /etc/guacamole
 else
-    print_error "配置目录 /etc/guacamole 不存在！"
+    print_warning "配置目录 /etc/guacamole 不存在！"
 fi
 
 if [ -L "${TOMCAT_HOME}/.guacamole" ] && [ -d "${TOMCAT_HOME}/.guacamole" ]; then
     print_success "符号链接 ${TOMCAT_HOME}/.guacamole 正确指向配置目录。"
 else
-    print_error "符号链接 ${TOMCAT_HOME}/.guacamole 未创建或指向错误！"
+    print_warning "符号链接 ${TOMCAT_HOME}/.guacamole 未创建或指向错误！"
 fi
 
 echo -e "\n${YELLOW}--- 4. Web 应用部署状态 ---${NC}"
@@ -294,25 +291,24 @@ if [ -d "${TOMCAT_WEBAPPS_DIR}/guacamole" ]; then
 elif [ -d "${TOMCAT_WEBAPPS_DIR}/ROOT" ]; then
     print_success "Guacamole 应用已解压到 'ROOT' 目录。"
 elif [ -f "${TOMCAT_WEBAPPS_DIR}/guacamole.war" ] || [ -f "${TOMCAT_WEBAPPS_DIR}/ROOT.war" ]; then
-    print_error "Tomcat 未能解压 .war 文件！这通常是权限问题或 Tomcat 启动失败。"
+    print_warning "Tomcat 未能解压 .war 文件！这通常是权限问题或 Tomcat 启动失败。"
 fi
 
 # 5. 关键日志审查
 echo -e "\n${YELLOW}--- 5. Tomcat 关键日志审查 (catalina.out) ---${NC}"
 TOMCAT_LOG="/var/log/${TOMCAT_SERVICE}/catalina.out"
-# 检查备用日志路径，以防万一
 if [ ! -f "${TOMCAT_LOG}" ] && [ -f "${TOMCAT_HOME}/logs/catalina.out" ]; then
     TOMCAT_LOG="${TOMCAT_HOME}/logs/catalina.out"
 fi
 
 if [ -f "${TOMCAT_LOG}" ]; then
-    echo -e "[i] 显示日志文件 '${TOMCAT_LOG}' 的最后 20 行:"
+    echo -e "[i] 显示日志文件 '${TOMCAT_LOG}' 的最后 30 行:"
     echo -e "${GREEN}------------------------- LOG START -------------------------${NC}"
-    sudo tail -n 20 "${TOMCAT_LOG}"
+    sudo tail -n 30 "${TOMCAT_LOG}"
     echo -e "${GREEN}-------------------------- LOG END --------------------------${NC}"
-    echo -e "[i] ${YELLOW}请在日志中查找 'SEVERE' 或 'ERROR' 等关键字以定位问题。${NC}"
+    echo -e "[i] ${RED}请在以上日志中仔细查找 'SEVERE', 'ERROR' 或 'Exception' 等关键字以定位问题。${NC}"
 else
-    print_warning "找不到 Tomcat 日志文件: ${TOMCAT_LOG}！"
+    print_error "找不到任何 Tomcat 日志文件！Tomcat 可能从未成功初始化。"
 fi
 
-echo -e "\n${GREEN}诊断完成。如果所有检查都显示成功，您的服务应该可以正常访问。${NC}"
+echo -e "\n${GREEN}诊断完成。${NC}"
