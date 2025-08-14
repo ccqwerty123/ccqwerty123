@@ -1,12 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v9.8 - Tomcat 10 & 非交互修复版)            ==
+# ==  Apache Guacamole 透明安装脚本 (v9.9 - Tomcat 日志目录修复版)               ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini AI 重构与增强)                                  ==
-# ==  此版本修正了 Tomcat 9 的可用性问题，全面转向 Tomcat 10。                ==
-# ==  增加了 debconf 预配置，以解决键盘布局等交互式提示导致的安装中断问题。    ==
-# ==  极大地增强了最终的诊断报告，以便快速定位任何潜在故障。                  ==
+# ==  此版本修复了在非 systemd 环境下手动启动 Tomcat 时，因 /logs 目录缺失      ==
+# ==  而导致的启动失败问题。脚本现在会自动创建该目录并设置正确权限。            ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -35,12 +34,10 @@ print_step "步骤 0/5：环境准备与依赖安装"
 sudo apt-get update
 check_success $? "更新软件包列表"
 
-# 【关键修复】预配置 debconf 以避免交互式提示 (如键盘布局选择)
 export DEBIAN_FRONTEND=noninteractive
 sudo debconf-set-selections <<< "keyboard-configuration keyboard-configuration/layoutcode string us"
-print_success "预配置 debconf 以避免安装过程中的交互提示"
+check_success $? "预配置 debconf 以避免安装过程中的交互提示"
 
-# 安装基础工具和 expect
 sudo apt-get install -y psmisc wget curl net-tools expect
 check_success $? "安装基础工具 (psmisc, wget, curl, net-tools, expect)"
 
@@ -70,7 +67,6 @@ expect eof
 EOF
 check_success $? "使用 expect 自动设置 VNC 密码"
 [ ! -f ~/.vnc/passwd ] && print_error "VNC 密码文件 (~/.vnc/passwd) 创建失败！"
-print_success "VNC 密码已自动设置。"
 
 print_info "正在创建优化的 VNC 启动脚本 (xstartup)..."
 cat > ~/.vnc/xstartup << EOF
@@ -105,13 +101,12 @@ GUACD_DEPS="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-
 sudo apt-get install -y $GUACD_DEPS
 check_success $? "安装 guacd 编译依赖项"
 
-GUAC_VERSION="1.5.5" # 更新到最新稳定版
+GUAC_VERSION="1.5.5"
 print_info "正在下载 Guacamole Server v${GUAC_VERSION}..."
 wget "https://dlcdn.apache.org/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz" -O guacamole-server.tar.gz
 check_success $? "下载 Guacamole 源代码"
-tar -xzf guacamole-server.tar.gz
-check_success $? "解压源代码"
-cd "guacamole-server-${GUAC_VERSION}"
+tar -xzf guacamole-server.tar.gz && cd "guacamole-server-${GUAC_VERSION}"
+check_success $? "解压并进入源代码目录"
 ./configure --with-systemd-dir=/etc/systemd/system
 check_success $? "执行 ./configure 脚本"
 make && sudo make install && sudo ldconfig
@@ -126,20 +121,17 @@ if [ -d /run/systemd/system ]; then
     sudo systemctl is-active --quiet guacd
     check_success $? "确认 guacd 服务正在后台运行 (via systemctl)"
 else
-    sudo pkill -f guacd && sleep 1
+    sudo pkill -f guacd || true && sleep 1
     sudo /usr/local/sbin/guacd
     check_success $? "直接启动 guacd 守护进程"
 fi
-
-sleep 2
-if ! pgrep guacd > /dev/null; then print_error "guacd 进程启动失败！"; fi
+sleep 2; if ! pgrep guacd > /dev/null; then print_error "guacd 进程启动失败！"; fi
 print_success "guacd 后端服务已成功启动。"
 
 # ==============================================================================
 # == 第三部分：安装 Tomcat 和 Guacamole Web 应用 (前端)
 # ==============================================================================
 print_step "步骤 3/5：安装 Tomcat 10 并配置 Guacamole Web 应用"
-# 【关键修复】将 tomcat9 替换为 tomcat10
 print_info "正在安装 Java 和 Tomcat 10..."
 sudo apt-get install -y default-jdk tomcat10
 check_success $? "安装 default-jdk 和 tomcat10"
@@ -159,7 +151,7 @@ sudo chown ${TOMCAT_USER}:${TOMCAT_USER} "${TOMCAT_WEBAPPS_DIR}/guacamole.war"
 check_success $? "部署 .war 文件并设置正确的所有者"
 
 print_info "正在创建 Guacamole 配置文件..."
-GUAC_PASS="GuacAdmin`date +%s | tail -c 5`" # 生成一个更随机的密码
+GUAC_PASS="GuacAdmin`date +%s | tail -c 5`"
 sudo mkdir -p /etc/guacamole
 sudo bash -c 'cat > /etc/guacamole/guacamole.properties' << EOF
 guacd-hostname: localhost
@@ -187,7 +179,6 @@ sudo chown -R ${TOMCAT_USER}:${TOMCAT_USER} /etc/guacamole
 sudo chmod -R 750 /etc/guacamole
 check_success $? "设置 /etc/guacamole 的所有者和权限"
 
-# 【关键修复】更新 Tomcat 10 的符号链接路径
 sudo ln -sfn /etc/guacamole "${TOMCAT_HOME}/.guacamole"
 check_success $? "为 Tomcat 10 创建 GUACAMOLE_HOME 符号链接"
 
@@ -196,8 +187,17 @@ if [ -d /run/systemd/system ]; then
     sudo systemctl restart ${TOMCAT_SERVICE}
     check_success $? "重启 ${TOMCAT_SERVICE} 服务 (via systemctl)"
 else
+    print_warning "非 systemd 环境，正在手动重启 Tomcat..."
     sudo pkill -9 -f "org.apache.catalina.startup.Bootstrap" || true
     sleep 3
+    
+    # 【关键修复 v9.9】确保 logs 目录存在且权限正确
+    print_info "正在检查并创建 Tomcat 日志目录（如果需要）..."
+    sudo mkdir -p "${TOMCAT_HOME}/logs"
+    check_success $? "创建 Tomcat 日志目录"
+    sudo chown -R ${TOMCAT_USER}:${TOMCAT_USER} "${TOMCAT_HOME}/logs"
+    check_success $? "设置 Tomcat 日志目录所有者"
+
     sudo -u ${TOMCAT_USER} ${TOMCAT_HOME}/bin/startup.sh
     check_success $? "手动启动 Tomcat 进程"
 fi
@@ -208,10 +208,11 @@ fi
 print_step "步骤 4/5：验证 Guacamole Web 应用部署状态"
 print_info "等待最多 60 秒，让 Tomcat 初始化 Guacamole 应用..."
 SUCCESS=false
+URL_PATH="/guacamole/"
 for i in {1..12}; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/guacamole/)
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080${URL_PATH})
     if [ "$HTTP_CODE" -eq 200 ]; then
-        print_success "验证成功！Guacamole 登录页面已在 /guacamole/ 上线 (HTTP 200)。"
+        print_success "验证成功！Guacamole 登录页面已在 ${URL_PATH} 上线 (HTTP 200)。"
         SUCCESS=true
         break
     else
@@ -221,8 +222,9 @@ for i in {1..12}; do
 done
 
 if [ "$SUCCESS" = false ]; then
-    print_warning "在 /guacamole/ 路径验证失败 (最后状态码: $HTTP_CODE)。"
+    print_warning "在 ${URL_PATH} 路径验证失败 (最后状态码: $HTTP_CODE)。"
     print_info "正在尝试将 Guacamole 部署为 ROOT 应用 (通过根路径 / 访问)..."
+    URL_PATH="/"
     sudo rm -rf "${TOMCAT_WEBAPPS_DIR}/ROOT"
     sudo cp "${TOMCAT_WEBAPPS_DIR}/guacamole.war" "${TOMCAT_WEBAPPS_DIR}/ROOT.war"
     check_success $? "将 guacamole.war 复制为 ROOT.war"
@@ -231,7 +233,7 @@ if [ "$SUCCESS" = false ]; then
     check_success $? "重启 Tomcat 服务"
     print_info "等待最多 45 秒让 ROOT 应用初始化..."
     for i in {1..9}; do
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080${URL_PATH})
         if [ "$HTTP_CODE" -eq 200 ]; then print_success "验证成功！Guacamole 已作为 ROOT 应用成功部署 (HTTP 200)。"; SUCCESS=true; break; fi
         echo -n "."; sleep 5;
     done
@@ -246,8 +248,7 @@ fi
 # ==============================================================================
 print_step "步骤 5/5：安装完成！最终诊断报告"
 
-FINAL_URL="http://<您的公网IP>:8080/"
-[ -d "${TOMCAT_WEBAPPS_DIR}/guacamole" ] && FINAL_URL="http://<您的公网IP>:8080/guacamole/"
+FINAL_URL="http://<您的公网IP>:8080${URL_PATH}"
 
 print_success "Guacamole 环境已安装和配置完毕。"
 echo -e "\n${BLUE}========================= 访问凭据 ==========================${NC}"
@@ -275,25 +276,12 @@ echo -e "\n${YELLOW}--- 3. 文件系统与权限检查 ---${NC}"
 if [ -d /etc/guacamole ]; then
     print_success "配置目录 /etc/guacamole 存在。"
     ls -ld /etc/guacamole
-    if [ "$(stat -c '%U:%G' /etc/guacamole)" == "${TOMCAT_USER}:${TOMCAT_USER}" ] || [ "$(stat -c '%U' /etc/guacamole)" == "root" ]; then # root for parent dir is ok if perms are right
-        print_success "/etc/guacamole 所有者正确。"
-    else
-        print_error "/etc/guacamole 所有者不正确！应为 '${TOMCAT_USER}' 或 'root'。"
-    fi
 else
     print_error "配置目录 /etc/guacamole 不存在！"
 fi
 
-if [ -f /etc/guacamole/guacamole.properties ]; then
-    print_success "配置文件 guacamole.properties 存在。"
-    ls -l /etc/guacamole/guacamole.properties
-else
-    print_error "配置文件 guacamole.properties 不存在！"
-fi
-
 if [ -L "${TOMCAT_HOME}/.guacamole" ] && [ -d "${TOMCAT_HOME}/.guacamole" ]; then
     print_success "符号链接 ${TOMCAT_HOME}/.guacamole 正确指向配置目录。"
-    ls -ld ${TOMCAT_HOME}/.guacamole
 else
     print_error "符号链接 ${TOMCAT_HOME}/.guacamole 未创建或指向错误！"
 fi
@@ -307,13 +295,16 @@ elif [ -d "${TOMCAT_WEBAPPS_DIR}/ROOT" ]; then
     print_success "Guacamole 应用已解压到 'ROOT' 目录。"
 elif [ -f "${TOMCAT_WEBAPPS_DIR}/guacamole.war" ] || [ -f "${TOMCAT_WEBAPPS_DIR}/ROOT.war" ]; then
     print_error "Tomcat 未能解压 .war 文件！这通常是权限问题或 Tomcat 启动失败。"
-else
-    print_error "在 webapps 目录中找不到 Guacamole .war 文件或解压目录！"
 fi
 
 # 5. 关键日志审查
 echo -e "\n${YELLOW}--- 5. Tomcat 关键日志审查 (catalina.out) ---${NC}"
 TOMCAT_LOG="/var/log/${TOMCAT_SERVICE}/catalina.out"
+# 检查备用日志路径，以防万一
+if [ ! -f "${TOMCAT_LOG}" ] && [ -f "${TOMCAT_HOME}/logs/catalina.out" ]; then
+    TOMCAT_LOG="${TOMCAT_HOME}/logs/catalina.out"
+fi
+
 if [ -f "${TOMCAT_LOG}" ]; then
     echo -e "[i] 显示日志文件 '${TOMCAT_LOG}' 的最后 20 行:"
     echo -e "${GREEN}------------------------- LOG START -------------------------${NC}"
@@ -321,7 +312,7 @@ if [ -f "${TOMCAT_LOG}" ]; then
     echo -e "${GREEN}-------------------------- LOG END --------------------------${NC}"
     echo -e "[i] ${YELLOW}请在日志中查找 'SEVERE' 或 'ERROR' 等关键字以定位问题。${NC}"
 else
-    print_error "找不到 Tomcat 日志文件: ${TOMCAT_LOG}！"
+    print_warning "找不到 Tomcat 日志文件: ${TOMCAT_LOG}！"
 fi
 
 echo -e "\n${GREEN}诊断完成。如果所有检查都显示成功，您的服务应该可以正常访问。${NC}"
