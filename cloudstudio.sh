@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V4 - 修复目录冲突 & 自动检测 systemd)
-# 功能描述: 在已具备 XFCE/VNC 环境下，自动安装并配置 webrtc-remote-screen
+# 脚本名称: install_webrtc_screen.sh (V5 - 无中断版)
+# 功能描述: 在已具备 XFCE/VNC 环境下，全自动安装 webrtc-remote-screen。
+#           如果检测到旧的安装，会自动删除并重装。
 # ==============================================================================
 
 # --- 配置区 ---
@@ -19,6 +20,7 @@ AGENT_PORT="9000"                        # Web访问端口
    DISPLAY_SESSION=":1"
 # ##                                                                        ## #
 # ############################################################################ #
+
 
 # --- 脚本初始化 ---
 set -e
@@ -51,34 +53,29 @@ if [[ -z "$DISPLAY_SESSION" ]]; then
 fi
 success "环境检查通过。"
 
-# 步骤 2: 清理和准备安装目录 (已修复)
+# 步骤 2: 清理和准备安装目录 (无中断)
+info "检查并准备安装目录: $INSTALL_DIR"
 if [ -d "$INSTALL_DIR" ]; then
-    warn "检测到已存在的安装目录: $INSTALL_DIR"
-    read -p "$(echo -e "${C_YELLOW}[提示]${C_RESET} 是否要删除旧目录并重新安装? [y/N]: ")" user_choice
-    if [[ "$user_choice" =~ ^[Yy]$ ]]; then
-        info "正在停止可能在运行的服务并删除旧的安装..."
-        sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
-        sudo systemctl disable webrtc-remote-screen.service >/dev/null 2>&1 || true
-        sudo rm -f /etc/systemd/system/webrtc-remote-screen.service >/dev/null 2>&1 || true
-        rm -rf "$INSTALL_DIR"
-        success "旧版本已清理。"
-    else
-        info "安装已取消。"
-        exit 0
-    fi
+    warn "检测到已存在的安装目录。将自动执行清理并重新安装。"
+    sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
+    sudo systemctl disable webrtc-remote-screen.service >/dev/null 2>&1 || true
+    sudo rm -f /etc/systemd/system/webrtc-remote-screen.service >/dev/null 2>&1 || true
+    rm -rf "$INSTALL_DIR"
+    success "旧目录已清理。"
 fi
 mkdir -p "$INSTALL_DIR"
+info "安装目录准备就绪。"
 
 # 步骤 3: 安装编译依赖
 info "准备安装编译依赖..."
 if [ -f /etc/debian_version ]; then
     PKG_MANAGER="apt-get"
-    DEPS="git make gcc libx11-dev libx264-dev screen" # 添加 screen 以备用
+    DEPS="git make gcc libx11-dev libx264-dev screen"
     info "检测到 Debian/Ubuntu 系统。"
 elif [ -f /etc/redhat-release ]; then
     PKG_MANAGER="yum"
     if command -v dnf &> /dev/null; then PKG_MANAGER="dnf"; fi
-    DEPS="git make gcc libX11-devel xz libx264-devel screen" # 添加 screen 以备用
+    DEPS="git make gcc libX11-devel xz libx264-devel screen"
     info "检测到 CentOS/RHEL 系统。"
 else
     error "无法识别的操作系统，脚本无法继续。"
@@ -119,7 +116,7 @@ export PATH=$PATH:/usr/local/go/bin
 info "准备下载和编译 webrtc-remote-screen..."
 cd "$INSTALL_DIR"
 info "正在从 GitHub 克隆源码..."
-git clone https://github.com/rviscarra/webrtc-remote-screen.git . # 克隆到当前目录
+git clone https://github.com/rviscarra/webrtc-remote-screen.git .
 
 info "正在修复和同步 Go 模块依赖..."
 go mod tidy
@@ -135,7 +132,7 @@ chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
 [ ! -f "$INSTALL_DIR/agent" ] && error "未找到编译产物 'agent'，安装失败。"
 success "webrtc-remote-screen 已成功安装到 $INSTALL_DIR"
 
-# 步骤 6: 创建服务或提供手动指令 (已重构)
+# 步骤 6: 创建服务或提供手动指令
 HAS_SYSTEMD=false
 if command -v systemctl &> /dev/null && [[ -d /run/systemd/system ]]; then
     HAS_SYSTEMD=true
