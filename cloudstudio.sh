@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh
+# 脚本名称: install_webrtc_screen.sh (V2 - 修复权限问题)
 # 功能描述: 在已具备 XFCE/VNC 环境下，自动安装并配置 webrtc-remote-screen
 # ==============================================================================
 #
@@ -16,8 +16,18 @@
 # --- 配置区 ---
 INSTALL_DIR="$HOME/webrtc-remote-screen" # 程序安装目录
 SERVICE_USER="$USER"                     # 运行服务的用户名 (通常无需修改)
-DISPLAY_SESSION=":1"                     # 【非常重要】要捕捉的X桌面, 请务必确认并修改!
 AGENT_PORT="9000"                        # Web访问端口
+
+# ############################################################################ #
+# ##                                                                        ## #
+# ##  【【【 请务必修改此项! 】】】                                           ## #
+# ##  在您的 VNC 桌面中打开终端，运行 `echo $DISPLAY` 命令查看此值。          ## #
+# ##  通常它的值是 :1 或 :2。                                                 ## #
+# ##                                                                        ## #
+   DISPLAY_SESSION=":1"
+# ##                                                                        ## #
+# ############################################################################ #
+
 
 # --- 脚本初始化 ---
 set -e
@@ -37,13 +47,16 @@ error() { echo -e "${C_RED}[错误]${C_RESET} $1"; exit 1; }
 
 # --- 主程序 ---
 
-# 步骤 1: 权限检查
-info "检查运行环境..."
+# 步骤 1: 权限和配置检查
+info "检查运行环境和配置..."
 if [[ $EUID -eq 0 ]]; then
    error "请不要使用 root 用户运行此脚本。请切换到拥有 sudo 权限的普通用户。"
 fi
 if ! sudo -v; then
     error "无法获取 sudo 权限。请确保当前用户在 sudoers 列表中。"
+fi
+if [ "$DISPLAY_SESSION" == "" ]; then
+    error "关键配置 DISPLAY_SESSION 为空！请编辑脚本并设置正确的值 (如 ':1')。"
 fi
 success "环境检查通过。"
 
@@ -52,10 +65,12 @@ if [ -f "$INSTALL_DIR/agent" ]; then
     warn "检测到已存在的安装目录: $INSTALL_DIR"
     read -p "$(echo -e "${C_YELLOW}[提示]${C_RESET} 是否要删除旧目录并重新安装? [y/N]: ")" user_choice
     if [[ "$user_choice" =~ ^[Yy]$ ]]; then
-        info "正在删除旧的安装..."
+        info "正在停止旧的服务并删除旧的安装..."
         sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
         sudo systemctl disable webrtc-remote-screen.service >/dev/null 2>&1 || true
+        sudo rm -f /etc/systemd/system/webrtc-remote-screen.service
         rm -rf "$INSTALL_DIR"
+        success "旧版本已清理。"
     else
         info "安装已取消。"
         exit 0
@@ -71,7 +86,7 @@ if [ -f /etc/debian_version ]; then
 elif [ -f /etc/redhat-release ]; then
     PKG_MANAGER="yum"
     if command -v dnf &> /dev/null; then PKG_MANAGER="dnf"; fi
-    DEPS="git make gcc libX11-devel libx264-devel"
+    DEPS="git make gcc libX11-devel xz libx264-devel"
     info "检测到 CentOS/RHEL 系统。"
 else
     error "无法识别的操作系统，脚本无法继续。"
@@ -86,18 +101,24 @@ sudo $PKG_MANAGER install -y $DEPS
 if ! command -v go &> /dev/null; then
     info "Go 环境未找到，现在开始自动安装..."
     GO_VERSION="1.21.0"
-    GO_FILE="go${GO_VERSION}.linux-amd64.tar.gz"
-    DOWNLOAD_URL="https://golang.org/dl/$GO_FILE"
+    GO_FILENAME="go${GO_VERSION}.linux-amd64.tar.gz"
+    GO_TEMP_PATH="/tmp/$GO_FILENAME" # 【修正】使用 /tmp 目录进行下载
+    DOWNLOAD_URL="https://golang.org/dl/$GO_FILENAME"
     
-    info "正在从 $DOWNLOAD_URL 下载 Go..."
-    wget --quiet --continue -O "$GO_FILE" "$DOWNLOAD_URL"
+    info "正在从 $DOWNLOAD_URL 下载 Go 到 $GO_TEMP_PATH..."
+    wget --quiet --continue -O "$GO_TEMP_PATH" "$DOWNLOAD_URL"
+    
+    if [ ! -f "$GO_TEMP_PATH" ]; then
+        error "Go 安装包下载失败！请检查网络或 URL: $DOWNLOAD_URL"
+    fi
     
     info "正在解压并安装 Go 到 /usr/local/go (需要sudo权限)..."
     sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf "$GO_FILE"
-    rm "$GO_FILE"
+    sudo tar -C /usr/local -xzf "$GO_TEMP_PATH"
     
-    # 为当前会话和未来的会话设置PATH
+    info "正在清理临时文件: $GO_TEMP_PATH"
+    rm "$GO_TEMP_PATH"
+    
     export PATH=$PATH:/usr/local/go/bin
     if ! grep -q "/usr/local/go/bin" "$HOME/.profile"; then
         echo -e '\n# Go Language Path\nexport PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
@@ -107,7 +128,6 @@ if ! command -v go &> /dev/null; then
 else
     success "检测到已安装的 Go 环境。"
 fi
-# 再次确认 Go 的路径在当前脚本的 PATH 中
 export PATH=$PATH:/usr/local/go/bin
 
 # 步骤 5: 克隆并编译 webrtc-remote-screen
@@ -167,7 +187,11 @@ echo
 success "🎉 安装全部完成！"
 echo
 info "--- 【重要】后续操作指南 ---"
-warn "1. 配置防火墙"
+warn "1. 确认 VNC 会话正在运行！"
+echo "   本服务依赖一个已存在的图形桌面会话。请确保您的 VNC Server 已经启动，"
+echo "   并且创建了您在脚本中配置的桌面 ($DISPLAY_SESSION)。"
+echo
+warn "2. 配置防火墙"
 echo "   您必须手动开放 Web 访问端口和 WebRTC 所需的 UDP 端口。"
 echo "   - Web 访问端口: TCP $AGENT_PORT"
 echo "   - WebRTC 数据端口 (建议范围): UDP 10000-20000"
@@ -182,12 +206,12 @@ echo "     sudo firewall-cmd --permanent --add-port=${AGENT_PORT}/tcp"
 echo "     sudo firewall-cmd --permanent --add-port=10000-20000/udp"
 echo "     sudo firewall-cmd --reload"
 echo
-info "2. 管理服务"
+info "3. 管理服务"
 echo "   ▶ 启动服务:   sudo systemctl start webrtc-remote-screen.service"
 echo "   ▶ 查看状态:   sudo systemctl status webrtc-remote-screen.service"
 echo "   ▶ 开机自启:   sudo systemctl enable webrtc-remote-screen.service"
 echo "   ▶ 停止服务:   sudo systemctl stop webrtc-remote-screen.service"
 echo
-info "3. 开始使用"
+info "4. 开始使用"
 echo "   服务启动且防火墙配置正确后，请在本地浏览器中访问:"
 echo "   http://<你的服务器IP>:${AGENT_PORT}"
