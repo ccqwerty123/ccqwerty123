@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ===================================================================================
-# ==  Apache Guacamole 透明安装脚本 (v10.0 - 诊断优先修复版)                      ==
+# ==  Apache Guacamole 透明安装脚本 (v10.1 - VNC 启动修复版)                      ==
 # ===================================================================================
 # ==  作者: Kilo Code (经 Gemini AI 重构与增强)                                  ==
-# ==  此版本修复了验证失败时脚本会提前退出的致命逻辑错误。                      ==
-# ==  现在，无论验证是否成功，脚本都会保证执行最终的详细诊断报告，以便排查问题。==
+# ==  此版本修复了 vncserver -kill 命令中一个致命的 shell 重定向语法拼写错误，   ==
+# ==  该错误导致 VNC 服务无法被正确清理和重启。                                   ==
 # ===================================================================================
 
 # --- 函数定义 ---
@@ -80,7 +80,8 @@ chmod +x ~/.vnc/xstartup
 check_success $? "创建并配置优化的 xstartup 文件"
 
 print_info "正在启动 VNC 服务器..."
-vncserver -kill :1 >/dev/null 2_1 && sleep 1
+# 【关键修复 v10.1】修正了致命的拼写错误 2_1 -> 2>&1
+vncserver -kill :1 >/dev/null 2>&1 && sleep 1
 vncserver :1 -localhost no
 check_success $? "启动 VNC 服务器 (:1)"
 
@@ -205,7 +206,6 @@ URL_PATH="/guacamole/"
 
 print_info "首次尝试: 等待最多 60 秒，让 Tomcat 在 /guacamole/ 初始化..."
 for i in {1..12}; do
-    # 使用 --connect-timeout 确保快速失败，-f 使其在 HTTP 错误时不输出内容
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:8080${URL_PATH})
     if [ "$HTTP_CODE" -eq 200 ]; then
         print_success "验证成功！Guacamole 登录页面已在 ${URL_PATH} 上线。"
