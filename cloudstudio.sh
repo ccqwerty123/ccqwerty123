@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V11 - 强制链接数学库版)
-# 功能描述: 专门解决 `undefined reference to `__log2f_finite'` 的链接错误。
+# 脚本名称: install_webrtc_screen.sh (V12 - 最终直通编译版)
+# 功能描述: 使用 -ldflags 直接向 go build 命令注入链接器标志，
+#           这是解决 `undefined reference` 问题的最直接方法。
 # ==============================================================================
 
 set -e
@@ -59,25 +60,25 @@ cd "$INSTALL_DIR"
 git clone https://github.com/rviscarra/webrtc-remote-screen.git .
 go mod tidy
 
-echo "[信息] 开始最终编译 (强制链接数学库)..."
+echo "[信息] 开始最终编译 (使用 -ldflags 强制注入链接器标志)..."
 
 # ############################################################################ #
 # ##                                                                        ## #
-# ##  这是最关键的一步！我们通过 CGO_LDFLAGS_ALLOW 允许 -lm 标志，并将其    ## #
-# ##  安全地附加到任何可能已存在的链接器标志后面。                          ## #
-# ##                                                                        ## #
-export CGO_LDFLAGS_ALLOW="-lm"
-export CGO_LDFLAGS="${CGO_LDFLAGS} -lm"
+# ##  这是解决问题的最终手段。我们不再依赖环境变量，而是将 '-lm' 标志       ## #
+# ##  通过 -ldflags='-extldflags "-lm"' 直接注入到 go build 命令中。      ## #
 # ##                                                                        ## #
 # ############################################################################ #
 
-if go build -tags "h264enc" -o agent cmd/agent.go; then
-    echo "[成功] 程序编译成功！链接错误已解决！"
+if go build -tags "h264enc" -ldflags='-extldflags "-lm"' -o agent cmd/agent.go; then
+    echo "[成功] 恭喜！程序编译成功！"
 else
-    echo "[错误] 编译仍然失败！问题可能比预想的更复杂。"
+    echo "[错误] 编译仍然失败。这表明您的云环境可能存在非常特殊的限制或工具链问题。"
     exit 1
 fi
+
 chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
+echo "[成功] agent 可执行文件已创建。"
+
 
 # --- 创建服务 ---
 echo "[信息] 创建 systemd 服务..."
