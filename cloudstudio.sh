@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V10 - 文件执行版)
-# 功能描述: 解决C语言链接错误和Bash语法错误的最终稳定版。
+# 脚本名称: install_webrtc_screen.sh (V11 - 强制链接数学库版)
+# 功能描述: 专门解决 `undefined reference to `__log2f_finite'` 的链接错误。
 # ==============================================================================
 
 set -e
@@ -12,7 +12,7 @@ set -x
 INSTALL_DIR="$HOME/webrtc-remote-screen"
 SERVICE_USER="$USER"
 AGENT_PORT="9000"
-DISPLAY_SESSION=":1" # 【【【 请务必确认此值是否正确! 】】】
+DISPLAY_SESSION=":1" # 【【【 请务-必-确-认此值是否正确! 】】】
 
 # --- 权限检查 ---
 if [[ $EUID -eq 0 ]]; then
@@ -52,9 +52,6 @@ if ! command -v go &> /dev/null; then
     rm /tmp/go.tar.gz
 fi
 export PATH=$PATH:/usr/local/go/bin
-if ! grep -q "/usr/local/go/bin" "$HOME/.profile"; then
-    echo 'export PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
-fi
 
 # --- 克隆与编译 ---
 echo "[信息] 克隆并编译源码..."
@@ -62,14 +59,22 @@ cd "$INSTALL_DIR"
 git clone https://github.com/rviscarra/webrtc-remote-screen.git .
 go mod tidy
 
-echo "[信息] 开始最终编译..."
-export CGO_CFLAGS="-std=gnu99"
-export CGO_LDFLAGS="-lm"
+echo "[信息] 开始最终编译 (强制链接数学库)..."
+
+# ############################################################################ #
+# ##                                                                        ## #
+# ##  这是最关键的一步！我们通过 CGO_LDFLAGS_ALLOW 允许 -lm 标志，并将其    ## #
+# ##  安全地附加到任何可能已存在的链接器标志后面。                          ## #
+# ##                                                                        ## #
+export CGO_LDFLAGS_ALLOW="-lm"
+export CGO_LDFLAGS="${CGO_LDFLAGS} -lm"
+# ##                                                                        ## #
+# ############################################################################ #
 
 if go build -tags "h264enc" -o agent cmd/agent.go; then
-    echo "[成功] 程序编译成功！"
+    echo "[成功] 程序编译成功！链接错误已解决！"
 else
-    echo "[错误] 编译失败！"
+    echo "[错误] 编译仍然失败！问题可能比预想的更复杂。"
     exit 1
 fi
 chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
