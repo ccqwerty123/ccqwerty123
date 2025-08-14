@@ -1,16 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: install_webrtc_screen.sh (V3 - 修复Go依赖问题)
+# 脚本名称: install_webrtc_screen.sh (V4 - 修复目录冲突 & 自动检测 systemd)
 # 功能描述: 在已具备 XFCE/VNC 环境下，自动安装并配置 webrtc-remote-screen
-# ==============================================================================
-#
-# 使用方法:
-#   1. 修改下面的 "--- 配置区 ---" 中的变量，特别是 DISPLAY_SESSION。
-#   2. 保存脚本: nano install_webrtc_screen.sh (然后粘贴内容)
-#   3. 赋予执行权限: chmod +x install_webrtc_screen.sh
-#   4. 以普通用户身份运行: ./install_webrtc_screen.sh
-#
 # ==============================================================================
 
 # --- 配置区 ---
@@ -27,7 +19,6 @@ AGENT_PORT="9000"                        # Web访问端口
    DISPLAY_SESSION=":1"
 # ##                                                                        ## #
 # ############################################################################ #
-
 
 # --- 脚本初始化 ---
 set -e
@@ -55,20 +46,20 @@ fi
 if ! sudo -v; then
     error "无法获取 sudo 权限。请确保当前用户在 sudoers 列表中。"
 fi
-if [ "$DISPLAY_SESSION" == "" ]; then
+if [[ -z "$DISPLAY_SESSION" ]]; then
     error "关键配置 DISPLAY_SESSION 为空！请编辑脚本并设置正确的值 (如 ':1')。"
 fi
 success "环境检查通过。"
 
-# 步骤 2: 检查是否已安装
-if [ -f "$INSTALL_DIR/agent" ]; then
+# 步骤 2: 清理和准备安装目录 (已修复)
+if [ -d "$INSTALL_DIR" ]; then
     warn "检测到已存在的安装目录: $INSTALL_DIR"
     read -p "$(echo -e "${C_YELLOW}[提示]${C_RESET} 是否要删除旧目录并重新安装? [y/N]: ")" user_choice
     if [[ "$user_choice" =~ ^[Yy]$ ]]; then
-        info "正在停止旧的服务并删除旧的安装..."
+        info "正在停止可能在运行的服务并删除旧的安装..."
         sudo systemctl stop webrtc-remote-screen.service >/dev/null 2>&1 || true
         sudo systemctl disable webrtc-remote-screen.service >/dev/null 2>&1 || true
-        sudo rm -f /etc/systemd/system/webrtc-remote-screen.service
+        sudo rm -f /etc/systemd/system/webrtc-remote-screen.service >/dev/null 2>&1 || true
         rm -rf "$INSTALL_DIR"
         success "旧版本已清理。"
     else
@@ -76,17 +67,18 @@ if [ -f "$INSTALL_DIR/agent" ]; then
         exit 0
     fi
 fi
+mkdir -p "$INSTALL_DIR"
 
 # 步骤 3: 安装编译依赖
 info "准备安装编译依赖..."
 if [ -f /etc/debian_version ]; then
     PKG_MANAGER="apt-get"
-    DEPS="git make gcc libx11-dev libx264-dev"
+    DEPS="git make gcc libx11-dev libx264-dev screen" # 添加 screen 以备用
     info "检测到 Debian/Ubuntu 系统。"
 elif [ -f /etc/redhat-release ]; then
     PKG_MANAGER="yum"
     if command -v dnf &> /dev/null; then PKG_MANAGER="dnf"; fi
-    DEPS="git make gcc libX11-devel xz libx264-devel"
+    DEPS="git make gcc libX11-devel xz libx264-devel screen" # 添加 screen 以备用
     info "检测到 CentOS/RHEL 系统。"
 else
     error "无法识别的操作系统，脚本无法继续。"
@@ -104,21 +96,14 @@ if ! command -v go &> /dev/null; then
     GO_FILENAME="go${GO_VERSION}.linux-amd64.tar.gz"
     GO_TEMP_PATH="/tmp/$GO_FILENAME"
     DOWNLOAD_URL="https://golang.org/dl/$GO_FILENAME"
-    
     info "正在从 $DOWNLOAD_URL 下载 Go 到 $GO_TEMP_PATH..."
     wget --quiet --continue -O "$GO_TEMP_PATH" "$DOWNLOAD_URL"
-    
-    if [ ! -f "$GO_TEMP_PATH" ]; then
-        error "Go 安装包下载失败！请检查网络或 URL: $DOWNLOAD_URL"
-    fi
-    
+    [ ! -f "$GO_TEMP_PATH" ] && error "Go 安装包下载失败！"
     info "正在解压并安装 Go 到 /usr/local/go (需要sudo权限)..."
     sudo rm -rf /usr/local/go
     sudo tar -C /usr/local -xzf "$GO_TEMP_PATH"
-    
     info "正在清理临时文件: $GO_TEMP_PATH"
     rm "$GO_TEMP_PATH"
-    
     export PATH=$PATH:/usr/local/go/bin
     if ! grep -q "/usr/local/go/bin" "$HOME/.profile"; then
         echo -e '\n# Go Language Path\nexport PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
@@ -132,14 +117,10 @@ export PATH=$PATH:/usr/local/go/bin
 
 # 步骤 5: 克隆并编译 webrtc-remote-screen
 info "准备下载和编译 webrtc-remote-screen..."
-mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
-
 info "正在从 GitHub 克隆源码..."
-git clone https://github.com/rviscarra/webrtc-remote-screen.git source
-cd source
+git clone https://github.com/rviscarra/webrtc-remote-screen.git . # 克隆到当前目录
 
-# 【【【 修正步骤 】】】
 info "正在修复和同步 Go 模块依赖..."
 go mod tidy
 success "依赖修复完成。"
@@ -150,24 +131,20 @@ if make; then
 else
     error "编译失败！请检查上面的错误信息。"
 fi
-
-# 步骤 6: 整理文件结构
-info "正在整理安装文件..."
-mv agent ../
-mv web ../
-cd ..
-rm -rf source
 chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
-
-if [ ! -f "$INSTALL_DIR/agent" ]; then
-    error "未找到编译产物 'agent'，安装失败。"
-fi
+[ ! -f "$INSTALL_DIR/agent" ] && error "未找到编译产物 'agent'，安装失败。"
 success "webrtc-remote-screen 已成功安装到 $INSTALL_DIR"
 
-# 步骤 7: 创建并配置 systemd 服务
-info "正在创建 systemd 服务，以便于管理 (需要sudo权限)..."
-SERVICE_FILE="/etc/systemd/system/webrtc-remote-screen.service"
-SERVICE_CONTENT="[Unit]
+# 步骤 6: 创建服务或提供手动指令 (已重构)
+HAS_SYSTEMD=false
+if command -v systemctl &> /dev/null && [[ -d /run/systemd/system ]]; then
+    HAS_SYSTEMD=true
+fi
+
+if [ "$HAS_SYSTEMD" = true ]; then
+    info "检测到 systemd，正在创建服务..."
+    SERVICE_FILE="/etc/systemd/system/webrtc-remote-screen.service"
+    SERVICE_CONTENT="[Unit]
 Description=WebRTC Remote Screen Service
 After=network.target
 
@@ -182,10 +159,12 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target"
-
-echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
-sudo systemctl daemon-reload
-success "systemd 服务已创建: $SERVICE_FILE"
+    echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
+    sudo systemctl daemon-reload
+    success "systemd 服务已创建。"
+else
+    warn "未检测到 systemd。将提供使用 'screen' 的手动启动指令。"
+fi
 
 # --- 完成 ---
 echo
@@ -201,21 +180,22 @@ echo "   您必须手动开放 Web 访问端口和 WebRTC 所需的 UDP 端口�
 echo "   - Web 访问端口: TCP $AGENT_PORT"
 echo "   - WebRTC 数据端口 (建议范围): UDP 10000-20000"
 echo
-echo "   ▶ UFW (Ubuntu/Debian) 示例命令:"
-echo "     sudo ufw allow ${AGENT_PORT}/tcp"
-echo "     sudo ufw allow 10000:20000/udp"
-echo "     sudo ufw reload"
-echo
-echo "   ▶ firewalld (CentOS/RHEL) 示例命令:"
-echo "     sudo firewall-cmd --permanent --add-port=${AGENT_PORT}/tcp"
-echo "     sudo firewall-cmd --permanent --add-port=10000-20000/udp"
-echo "     sudo firewall-cmd --reload"
-echo
-info "3. 管理服务"
+
+if [ "$HAS_SYSTEMD" = true ]; then
+# systemd 指令
+info "3. 管理服务 (使用 systemd)"
 echo "   ▶ 启动服务:   sudo systemctl start webrtc-remote-screen.service"
 echo "   ▶ 查看状态:   sudo systemctl status webrtc-remote-screen.service"
 echo "   ▶ 开机自启:   sudo systemctl enable webrtc-remote-screen.service"
 echo "   ▶ 停止服务:   sudo systemctl stop webrtc-remote-screen.service"
+else
+# screen 指令
+info "3. 管理服务 (使用 screen)"
+echo "   由于没有检测到 systemd，请使用以下命令手动在后台运行服务:"
+echo "   ▶ 启动服务:   DISPLAY=$DISPLAY_SESSION screen -dmS webrtc $INSTALL_DIR/agent -p $AGENT_PORT"
+echo "   ▶ 查看日志:   screen -r webrtc  (按 Ctrl+A 然后按 D 键可分离会话并使其在后台继续运行)"
+echo "   ▶ 停止服务:   screen -X -S webrtc quit"
+fi
 echo
 info "4. 开始使用"
 echo "   服务启动且防火墙配置正确后，请在本地浏览器中访问:"
