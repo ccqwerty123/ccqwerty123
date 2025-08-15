@@ -10,29 +10,26 @@ import psutil
 import time
 import shutil
 
-# --- 1. 基础配置 (已按要求修改) ---
+# --- 1. 基础配置 (无修改) ---
 
 KEYHUNT_PATH = '/workspace/keyhunt/keyhunt'
-# 【已修改】输出目录改为临时目录
 OUTPUT_DIR = '/tmp/keyhunt_output' 
 
 BTC_ADDRESS = '1DBaumZxUkM4qMQRt2LVWyFJq5kDtSZQot'
 START_KEY = '0000000000000000000000000000000000000000000000000000000000000800'
 END_KEY =   '0000000000000000000000000000000000000000000000000000000000000fff'
 
-# --- 2. 全局状态、管道与正则表达式 (已修改) ---
+# --- 2. 全局状态、管道与正则表达式 (无修改) ---
 
-# 【已修改】使用一个列表来存储所有找到的密钥
 ALL_FOUND_KEYS = []
 processes_to_cleanup = []
 
 PIPE_KH = '/tmp/keyhunt_pipe'
 
-# 正则表达式 (无修改)
 KEYHUNT_PRIV_KEY_RE = re.compile(r'(?:Private key \(hex\)|Hit! Private Key):\s*([0-9a-fA-F]+)')
 
 
-# --- 3. 系统信息与硬件检测 (无修改，遵从您的要求) ---
+# --- 3. 系统信息与硬件检测 (无修改) ---
 
 def display_system_info():
     """在主控窗口显示简要的系统信息"""
@@ -57,7 +54,7 @@ def get_cpu_threads():
         return 15
 
 
-# --- 4. 核心执行逻辑与最终报告 (已修改) ---
+# --- 4. 核心执行逻辑与最终报告 (无修改) ---
 
 def cleanup():
     """程序退出时，终止所有子进程并删除管道文件。"""
@@ -74,13 +71,12 @@ def cleanup():
 atexit.register(cleanup)
 
 def generate_final_report():
-    """【新功能】根据内存中收集到的密钥生成最终报告。"""
+    """根据内存中收集到的密钥生成最终报告。"""
     print("="*60)
     if ALL_FOUND_KEYS:
         print(f"🎉🎉🎉 任务结束！共捕获到 {len(ALL_FOUND_KEYS)} 个密钥！🎉🎉🎉")
         print("-" * 60)
         for i, key in enumerate(ALL_FOUND_KEYS):
-            # 将不足64位的密钥在左侧补0，以标准格式显示
             full_key = key.lower().zfill(64)
             print(f"  密钥 #{i+1}: {full_key}")
     else:
@@ -88,28 +84,25 @@ def generate_final_report():
     print("="*60)
 
 def run_keyhunt_and_monitor(command, pipe_path):
-    """【已修改】在新终端中运行KeyHunt，并持续监控和收集所有找到的密钥。"""
+    """在新终端中运行KeyHunt，并持续监控和收集所有找到的密钥。"""
     global ALL_FOUND_KEYS
     
     if os.path.exists(pipe_path): os.remove(pipe_path)
     os.mkfifo(pipe_path)
 
     command_str = ' '.join(shlex.quote(arg) for arg in command)
-    # 在命令结束后提示用户，并保持窗口开启
     terminal_command_str = f"bash -c \"{command_str} | tee {pipe_path}; echo '--- KeyHunt 已结束，此窗口可关闭 ---'; exec bash\""
 
     terminal_process = subprocess.Popen(['xfce4-terminal', '--title', '实时监控: KeyHunt (CPU)', '-e', terminal_command_str])
     processes_to_cleanup.append(terminal_process)
 
-    print(f"✅ KeyHunt 已在新窗口启动，主控台正在监控结果...")
+    print(f"\n✅ KeyHunt 已在新窗口启动，主控台正在监控结果...")
     try:
         with open(pipe_path, 'r') as fifo:
-            # 持续读取，直到管道关闭（即KeyHunt进程结束）
             for line in fifo:
                 match = KEYHUNT_PRIV_KEY_RE.search(line)
                 if match:
                     found_key = match.group(1).lower()
-                    # 打印实时通知，并存入列表
                     print(f"\n🔔 [实时捕获] 监控到密钥: {found_key} 🔔")
                     ALL_FOUND_KEYS.append(found_key)
     except Exception as e:
@@ -117,8 +110,9 @@ def run_keyhunt_and_monitor(command, pipe_path):
     finally:
         print("[监控线程] 检测到 KeyHunt 进程已退出。")
 
+
 def main():
-    """【已修改】主函数，等待任务完成后进行最终报告。"""
+    """主函数，增加了N值计算和命令输出，并修复了命令本身。"""
     if not shutil.which('xfce4-terminal'):
         print("错误: 'xfce4-terminal' 未找到。此脚本专为 Xfce 桌面环境设计。")
         sys.exit(1)
@@ -127,35 +121,59 @@ def main():
     time.sleep(1)
 
     try:
-        # 临时目录仅用于存放地址文件
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         kh_address_file = os.path.join(OUTPUT_DIR, 'target_address.txt')
         with open(kh_address_file, 'w') as f: f.write(BTC_ADDRESS)
         
         print("INFO: 正在根据系统硬件自动配置性能参数...")
         keyhunt_threads = get_cpu_threads()
-        print("="*40)
+        
+        # ====================================================================
+        # --- [VULNERABILITY FIX & ENHANCED OUTPUT] - 漏洞修复与输出增强 ---
+        # ====================================================================
+        print("\n" + "="*50)
+        print("--- 任务参数详情 ---")
+        
+        # 1. 计算确保完整扫描所需的 -n 参数值
+        start_int = int(START_KEY, 16)
+        end_int = int(END_KEY, 16)
+        keys_to_search = end_int - start_int + 1
+        # 向上取整到最接近的 1024 的倍数，以优化性能
+        n_value_dec = (keys_to_search + 1023) // 1024 * 1024
+        n_value_hex = hex(n_value_dec)
 
-        # KeyHunt命令（无 -o 参数，因为我们通过屏幕捕获）
+        # 2. 打印所有关键信息
+        print(f"  -> 目标地址: {BTC_ADDRESS}")
+        print(f"  -> 搜索范围 (HEX): {START_KEY} -> {END_KEY}")
+        print(f"  -> 范围密钥总数: {keys_to_search}")
+        print(f"  -> 计算出的N值 (DEC): {n_value_dec}")
+        print(f"  -> 计算出的N值 (HEX): {n_value_hex}")
+        print("="*50)
+
+        # 3. 构建修复后的命令
+        #    - 增加了 -n 参数以确保进行精确的、完整的范围扫描。
+        #    - 移除了 -R 参数，因为它会强制随机搜索，与我们的目标冲突。
         keyhunt_command = [
             KEYHUNT_PATH, '-m', 'address', '-f', kh_address_file,
             '-l', 'both', '-t', str(keyhunt_threads),
-            '-R', 
-            '-r', f'{START_KEY}:{END_KEY}'
+            '-r', f'{START_KEY}:{END_KEY}',
+            '-n', n_value_hex  # <-- 关键修复
         ]
+        
+        # 4. 打印最终执行的命令
+        command_str_for_display = shlex.join(keyhunt_command)
+        print(f"\n[INFO] 准备执行的最终命令:\n{command_str_for_display}")
+        # ====================================================================
 
         # 启动监控线程
         monitor_thread = threading.Thread(target=run_keyhunt_and_monitor, args=(keyhunt_command, PIPE_KH))
         monitor_thread.start()
         
-        # 等待监控线程结束，这意味着KeyHunt进程已经运行完毕
         monitor_thread.join()
         
-        # 【新功能】任务结束后，延迟指定时间
         print(f"\nINFO: KeyHunt 任务已完成。等待 5 秒后生成最终报告...")
         time.sleep(5)
         
-        # 生成并打印最终报告
         generate_final_report()
         print("\nINFO: 脚本执行完毕。")
 
