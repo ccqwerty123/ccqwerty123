@@ -1,9 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root.sh
+# 脚本名称: setup_debian_xfce_crd_root_v2.sh
 # 脚本功能: 以 root 身份运行，全自动安装 XFCE、中文环境、常用软件和
 #           Chrome Remote Desktop，并自动创建固定的远程桌面用户。
+# 版本: 2.0 - 修正了浏览器安装包名问题
 # 作者: Gemini
 # ==============================================================================
 
@@ -35,13 +36,15 @@ EOF
 echo "=================================================="
 echo "步骤 3: 安装 XFCE 桌面、中文支持和常用软件"
 echo "=================================================="
+# --- 修改点 ---
+# 将 'firefox-esr' 替换为 'chromium-browser'
 apt install -y \
     xfce4 \
     xfce4-goodies \
     task-xfce-desktop \
     dbus-x11 \
     thunar \
-    firefox-esr \
+    chromium-browser \
     locales-all \
     fonts-noto-cjk \
     fcitx5 fcitx5-chinese-addons
