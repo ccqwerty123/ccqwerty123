@@ -171,49 +171,9 @@ fi
 usermod -aG sudo "$NEW_USER"
 usermod -aG chrome-remote-desktop "$NEW_USER"
 
-# 步骤 9: [新增功能] 配置密钥环(Keyring)自动解锁，避免弹窗
-# [CRITICAL UX FIX - DO NOT REMOVE]
+# 步骤 9: 为新用户预配置包含中文环境的桌面会话
 echo "=================================================="
-echo "步骤 9: 配置密钥环(Keyring)自动解锁以避免弹窗"
-echo "=================================================="
-apt-get install -y libpam-gnome-keyring
-PAM_CONFIG="/etc/pam.d/chrome-remote-desktop"
-if [ -f "$PAM_CONFIG" ]; then
-    if ! grep -q "pam_gnome_keyring.so" "$PAM_CONFIG"; then
-        echo "正在向 $PAM_CONFIG 添加自动解锁配置..."
-        {
-            echo ""
-            echo "# Added by setup script to auto-unlock keyring"
-            echo "auth    optional        pam_gnome_keyring.so"
-            echo "session optional        pam_gnome_keyring.so auto_start"
-        } >> "$PAM_CONFIG"
-        echo "密钥环自动解锁配置成功。"
-    else
-        echo "密钥环自动解锁已配置，跳过。"
-    fi
-else
-    echo "警告: 未找到 PAM 配置文件 $PAM_CONFIG。跳过密钥环配置。"
-fi
-
-# 步骤 10: [新增功能] 为用户禁用终端粘贴警告
-# [CRITICAL UX FIX - DO NOT REMOVE]
-echo "=================================================="
-echo "步骤 10: 为用户 ${NEW_USER} 禁用终端粘贴警告"
-echo "=================================================="
-TERMINAL_CONFIG_DIR="/home/${NEW_USER}/.config/xfce4/terminal"
-TERMINAL_CONFIG_FILE="${TERMINAL_CONFIG_DIR}/terminalrc"
-su - "${NEW_USER}" -c "mkdir -p '${TERMINAL_CONFIG_DIR}'"
-if ! su - "${NEW_USER}" -c "grep -q 'MiscUnsafePasteDialog' '${TERMINAL_CONFIG_FILE}' 2>/dev/null"; then
-    su - "${NEW_USER}" -c "echo 'MiscUnsafePasteDialog=FALSE' >> '${TERMINAL_CONFIG_FILE}'"
-    echo "已创建新终端配置以禁用粘贴警告。"
-else
-    su - "${NEW_USER}" -c "sed -i 's/MiscUnsafePasteDialog=.*/MiscUnsafePasteDialog=FALSE/' '${TERMINAL_CONFIG_FILE}'"
-    echo "已更新现有终端配置以禁用粘贴警告。"
-fi
-
-# 步骤 11: 为新用户预配置包含中文环境的桌面会话
-echo "=================================================="
-echo "步骤 11: 为用户 ${NEW_USER} 预配置桌面会话脚本"
+echo "步骤 9: 为用户 ${NEW_USER} 预配置桌面会话脚本"
 echo "=================================================="
 su -c 'cat <<EOF > /home/'${NEW_USER}'/.chrome-remote-desktop-session
 export LANG=zh_CN.UTF-8
@@ -226,23 +186,23 @@ fcitx5 -d
 exec /usr/bin/startxfce4
 EOF' "${NEW_USER}"
 
-# 步骤 12: 统一用户主目录权限
+# 步骤 10: 统一用户主目录权限
 # [CRITICAL STEP - DO NOT REMOVE]
 echo "=================================================="
-echo "步骤 12: 修正用户 ${NEW_USER} 的主目录文件所有权"
+echo "步骤 10: 修正用户 ${NEW_USER} 的主目录文件所有权"
 echo "=================================================="
 chown -R "${NEW_USER}":"${NEW_USER}" "/home/${NEW_USER}"
 echo "用户主目录权限已成功修正。"
 
-# 步骤 13: 清理APT缓存
+# 步骤 11: 清理APT缓存
 echo "=================================================="
-echo "步骤 13: 清理软件包缓存以释放空间"
+echo "步骤 11: 清理软件包缓存以释放空间"
 echo "=================================================="
 apt-get clean
 
-# 步骤 14: 执行最终的自动化授权流程
+# 步骤 12: 执行最终的自动化授权流程
 echo "=================================================="
-echo "步骤 14: 执行最终的自动化授权流程"
+echo "步骤 12: 执行最终的自动化授权流程"
 echo "=================================================="
 AUTH_COMMAND_CLEANED=$(echo "$AUTH_COMMAND" | sed 's/DISPLAY=.*start-host/start-host/')
 echo "正在为用户 ${NEW_USER} 自动执行授权..."
