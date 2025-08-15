@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v9.sh (启动时输入版)
-# 脚本功能: 脚本启动后立即要求输入授权码，然后进行全自动安装和配置，
-#           实现真正的“一次输入，全程无人值守”。
-# 版本: 9.0 - 优化流程，将授权码输入提前至脚本启动时。
+# 脚本名称: setup_debian_xfce_crd_root_v10.sh (健壮输入版)
+# 脚本功能: 修复在非完全交互式终端(如云IDE)中read命令不等待输入的问题。
+#           脚本会循环提示，直到获得有效的授权码为止。
+# 版本: 10.0 - 强制从 /dev/tty 读取输入，增加循环确保输入。
 # 作者: Gemini
 # ==============================================================================
 
@@ -13,9 +13,7 @@ readonly NEW_USER="deskuser"
 readonly NEW_PASS="deskuser"
 readonly PIN_CODE="666666"
 
-
 # --- 脚本启动时的初始交互 ---
-# 清屏，给用户一个干净的界面
 clear
 
 echo "========================================================================"
@@ -34,22 +32,23 @@ echo ""
 echo -e "\033[1;33m4. 将复制的命令完整粘贴到下方提示符后，然后按 Enter 键:\033[0m"
 echo "------------------------------------------------------------------------"
 
-# 读取用户输入的原始命令
-read -p "请在此处粘贴授权命令: " AUTH_COMMAND_RAW
+# [关键修复] 使用循环和 /dev/tty 确保能读取到用户输入
+AUTH_COMMAND=""
+while [ -z "$AUTH_COMMAND" ]; do
+    # 强制从控制终端读取，以兼容各种环境
+    read -p "请在此处粘贴授权命令: " AUTH_COMMAND_RAW < /dev/tty
+    
+    # 自动删除可能存在的前后空格
+    AUTH_COMMAND=$(echo "${AUTH_COMMAND_RAW}" | xargs)
 
-# 自动删除可能存在的前后空格
-AUTH_COMMAND=$(echo "${AUTH_COMMAND_RAW}" | xargs)
-
-# 验证输入是否为空
-if [ -z "$AUTH_COMMAND" ]; then
-    echo -e "\033[1;31m错误：未输入任何命令。脚本已终止。\033[0m"
-    exit 1
-fi
+    if [ -z "$AUTH_COMMAND" ]; then
+        echo -e "\033[1;31m输入不能为空，请重新粘贴命令！\033[0m"
+    fi
+done
 
 echo ""
 echo -e "\033[1;32m✅ 授权码已接收。脚本将开始全自动安装，请耐心等待...\033[0m"
 sleep 3
-
 
 # --- 辅助函数定义 ---
 install_best_choice() {
@@ -203,7 +202,7 @@ echo "=================================================="
 echo "步骤 12: 执行最终的自动化授权流程"
 echo "=================================================="
 
-# 移除命令中可能存在的前缀 `DISPLAY= /opt/google/chrome-remote-desktop/start-host ...`
+# 移除命令中可能存在的前缀
 AUTH_COMMAND_CLEANED=$(echo "$AUTH_COMMAND" | sed 's/DISPLAY=.*start-host/start-host/')
 
 echo "正在为用户 ${NEW_USER} 自动执行授权..."
@@ -216,7 +215,6 @@ if [ $? -eq 0 ]; then
     echo -e "\033[1;32m授权命令执行成功！\033[0m"
     echo "正在启动远程桌面服务..."
     
-    # 兼容非 systemd 环境
     if [ -f /etc/init.d/chrome-remote-desktop ]; then
         /etc/init.d/chrome-remote-desktop start
         
@@ -239,6 +237,6 @@ if [ $? -eq 0 ]; then
     echo "========================================================================"
 
 else
-    echo -e "\033[1;31m❌ 授权命令执行失败！请检查您粘贴的命令是否正确。\03-3[0m"
+    echo -e "\033[1;31m❌ 授权命令执行失败！请检查您粘贴的命令是否正确。\033[0m"
     exit 1
 fi
