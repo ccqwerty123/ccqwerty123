@@ -1,20 +1,69 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v2.sh
-# 脚本功能: 以 root 身份运行，全自动安装 XFCE、中文环境、常用软件和
-#           Chrome Remote Desktop，并自动创建固定的远程桌面用户。
-# 版本: 2.0 - 修正了浏览器安装包名问题
+# 脚本名称: setup_debian_xfce_crd_root_v4.sh
+# 脚本功能: 以 root 身份运行，通过智能、带优先级的选择机制， resiliently 
+#           安装 XFCE 桌面及一系列常用软件。优先尝试安装 Google Chrome。
+#           在任何非核心组件安装失败时都不会中断。
+# 版本: 4.0 - 引入可重用的智能安装函数，优先安装 Chrome，并扩展候选包列表。
 # 作者: Gemini
 # ==============================================================================
 
-# --- 安全设置：任何命令失败，脚本立即退出 ---
-set -e
-
-# --- 全局变量：自动创建的用户名和密码 ---
-# !!! 安全警告: 在脚本中硬编码密码存在风险。请确保您了解并接受此风险。!!!
+# --- 全局变量 ---
 readonly NEW_USER="deskuser"
 readonly NEW_PASS="deskuser"
+
+# --- 辅助函数定义 ---
+
+# 函数: install_best_choice
+# 用途: 从一个软件包列表中，按顺序尝试安装第一个可用的软件包。
+# 参数: $1=软件类别（用于打印信息），$2, $3...=软件包候选列表
+install_best_choice() {
+    local category="$1"
+    shift
+    for pkg in "$@"; do
+        if apt-cache show "$pkg" &> /dev/null; then
+            echo "找到可用的 [$category]: $pkg。正在安装..."
+            if apt install -y "$pkg"; then
+                echo "[$category] '$pkg' 安装成功。"
+                return 0
+            else
+                echo "警告：尝试安装 '$pkg' 时出错，将尝试下一个候选软件。"
+            fi
+        fi
+    done
+    echo "警告：在为 [$category] 提供的所有候选列表中，均未找到可安装的软件包。"
+    return 1
+}
+
+# 函数: install_google_chrome
+# 用途: 尝试通过添加官方源的方式安装 Google Chrome。
+install_google_chrome() {
+    echo "正在尝试安装 Google Chrome (最高优先级)..."
+    # 确保依赖已安装
+    apt install -y wget gpg
+    
+    # 下载并添加 Google 的 GPG 密钥
+    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
+    
+    # 添加 Chrome 的软件源
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    
+    # 更新软件源并安装
+    apt update
+    if apt install -y google-chrome-stable; then
+        echo "Google Chrome 安装成功。"
+        return 0
+    else
+        echo "Google Chrome 安装失败。将尝试其他浏览器。"
+        # 清理失败的配置
+        rm -f /etc/apt/sources.list.d/google-chrome.list
+        return 1
+    fi
+}
+
+
+# --- 脚本主流程 ---
 
 # --- 1. 系统准备与更新 ---
 echo "=================================================="
@@ -23,7 +72,7 @@ echo "=================================================="
 apt update
 apt --fix-broken install -y
 
-# --- 2. 预配置键盘布局以避免安装过程中的交互提示 ---
+# --- 2. 预配置键盘布局 ---
 echo "=================================================="
 echo "步骤 2: 预配置键盘布局以实现非交互式安装"
 echo "=================================================="
@@ -32,22 +81,33 @@ keyboard-configuration keyboard-configuration/layoutcode string us
 keyboard-configuration keyboard-configuration/modelcode string pc105
 EOF
 
-# --- 3. 安装 XFCE 桌面环境及常用软件 ---
+# --- 3. 安装核心桌面与中文支持 ---
 echo "=================================================="
-echo "步骤 3: 安装 XFCE 桌面、中文支持和常用软件"
+echo "步骤 3: 安装 XFCE 桌面、中文支持和核心组件"
 echo "=================================================="
-# --- 修改点 ---
-# 将 'firefox-esr' 替换为 'chromium-browser'
 apt install -y \
     xfce4 \
     xfce4-goodies \
     task-xfce-desktop \
     dbus-x11 \
-    thunar \
-    chromium-browser \
     locales-all \
     fonts-noto-cjk \
     fcitx5 fcitx5-chinese-addons
+
+# --- 3.5 智能安装常用软件 ---
+echo "=================================================="
+echo "步骤 3.5: 智能、带优先级地安装常用软件"
+echo "=================================================="
+
+# 浏览器安装
+if ! install_google_chrome; then
+    install_best_choice "网页浏览器" "chromium-browser" "chromium" "firefox-esr" "firefox"
+fi
+
+# 其他软件安装
+install_best_choice "文件管理器" "thunar" "nemo" "caja"
+install_best_choice "文本编辑器" "mousepad" "gedit" "pluma"
+install_best_choice "终端模拟器" "xfce4-terminal" "gnome-terminal"
 
 # --- 4. 设置系统默认语言为中文 ---
 echo "=================================================="
@@ -58,37 +118,30 @@ export LANG=zh_CN.UTF-8
 
 # --- 5. 下载并安装 Chrome Remote Desktop ---
 echo "=================================================="
-echo "步骤 5: 下载并安装 Chrome Remote Desktop"
+echo "步骤 5: 下载并安装 Chrome Remote Desktop 服务"
 echo "=================================================="
 wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-# 使用 DEBIAN_FRONTEND=noninteractive 确保即使预配置失败也不会卡住
 DEBIAN_FRONTEND=noninteractive apt install -y ./chrome-remote-desktop_current_amd64.deb
-# 清理下载的安装包
 rm chrome-remote-desktop_current_amd64.deb
 
-# --- 6. 自动创建新的远程桌面用户 ---
+# --- 6. 自动创建用户 ---
 echo "=================================================="
 echo "步骤 6: 自动创建远程桌面专用用户: ${NEW_USER}"
 echo "=================================================="
-# 检查用户是否已存在
 if id "$NEW_USER" &>/dev/null; then
     echo "用户 '$NEW_USER' 已存在，跳过创建步骤。"
 else
-    # 使用 useradd (非交互式) 创建用户，并用 chpasswd 设置密码
     useradd -m -s /bin/bash "$NEW_USER"
     echo "$NEW_USER:$NEW_PASS" | chpasswd
     echo "用户 '$NEW_USER' 创建成功，密码已设置为 '$NEW_PASS'。"
 fi
-# 确保用户在正确的用户组中
 usermod -aG sudo "$NEW_USER"
 usermod -aG chrome-remote-desktop "$NEW_USER"
 
-# --- 7. 为新用户预配置 XFCE 桌面会话 ---
-# 这一步至关重要，可以防止首次连接时因 XFCE 初始设置弹窗而断开
+# --- 7. 预配置桌面会话 ---
 echo "=================================================="
 echo "步骤 7: 为用户 ${NEW_USER} 预配置桌面会话"
 echo "=================================================="
-# 使用 su -c 以新用户的身份执行命令，在家目录下创建配置文件
 su -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > ~/.chrome-remote-desktop-session' "$NEW_USER"
 su -c 'echo "xfce4-session" > ~/.xsession' "$NEW_USER"
 
