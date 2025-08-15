@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v11.sh (最终稳定版)
-# 脚本功能: 启动时获取授权码，然后全自动安装并配置一个稳定、安全的 XFCE
-#           中文远程桌面环境。本版本修复了所有已知问题。
-# 版本: 11.0 - 修复 gpg 覆盖提示；恢复并强化所有关键步骤的注释。
+# 脚本名称: setup_debian_xfce_crd_root_v12.sh (最终完美版)
+# 脚本功能: 集成桌面初始化设置，全自动处理密钥环(Keyring)弹窗和终端粘贴警告，
+#           实现真正的开箱即用。
+# 版本: 12.0 - 新增密钥环自动解锁和禁用终端粘贴警告的功能。
 # 作者: Gemini
 # ==============================================================================
 
@@ -66,11 +66,9 @@ install_best_choice() {
 }
 
 # [CRITICAL FUNCTION - DO NOT MODIFY LOGIC]
-# 此函数用于安装 Chrome，并处理了可能出现的交互提示。
 install_google_chrome() {
     echo "正在尝试安装 Google Chrome (最高优先级)..."
     apt-get install -y wget gpg
-    # [KEY FIX] 使用标准输出重定向 `>` 代替 `-o`，以强制覆盖现有文件，避免交互式提示。
     wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-chrome-keyring.gpg
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
     apt-get update
@@ -87,16 +85,15 @@ install_google_chrome() {
 
 # --- 脚本主流程 ---
 
-# 1. 系统准备与更新
+# 步骤 1: 系统准备与更新
 echo "=================================================="
 echo "步骤 1: 更新系统软件包列表并修复任何依赖问题"
 echo "=================================================="
 apt-get update
 apt-get --fix-broken install -y
 
-# 2. 预配置键盘布局
+# 步骤 2: 预配置键盘布局
 # [CRITICAL STEP - DO NOT REMOVE]
-# 此步骤至关重要，用于避免软件包安装过程中出现交互式对话框，确保全自动化。
 echo "=================================================="
 echo "步骤 2: 预配置键盘布局以实现非交互式安装"
 echo "=================================================="
@@ -105,7 +102,7 @@ keyboard-configuration keyboard-configuration/layoutcode string us
 keyboard-configuration keyboard-configuration/modelcode string pc105
 EOF
 
-# 3. 安装核心桌面与中文支持
+# 步骤 3: 安装核心桌面与中文支持
 echo "=================================================="
 echo "步骤 3: 安装 XFCE 桌面、中文支持和核心组件"
 echo "=================================================="
@@ -118,7 +115,7 @@ apt-get install -y \
     fonts-noto-cjk \
     fcitx5 fcitx5-chinese-addons
 
-# 4. 设置系统全局中文环境
+# 步骤 4: 设置系统全局中文环境
 echo "=================================================="
 echo "步骤 4: 生成并设置系统全局中文 Locale"
 echo "=================================================="
@@ -128,9 +125,8 @@ update-locale LANG=zh_CN.UTF-8
 echo "LANG=zh_CN.UTF-8" > /etc/default/locale
 echo "系统默认语言已设置为中文。"
 
-# 5. 解决 Fcitx5 多进程冲突的根源
+# 步骤 5: 解决 Fcitx5 多进程冲突的根源
 # [CRITICAL STEP - DO NOT REMOVE]
-# 这是确保中文输入法稳定运行的核心修复。
 echo "=================================================="
 echo "步骤 5: 禁用 Fcitx5 全局自启动以避免冲突"
 echo "=================================================="
@@ -139,9 +135,8 @@ if [ -f /etc/xdg/autostart/org.fcitx.Fcitx5.desktop ]; then
     echo "Fcitx5 全局自启动项已成功禁用。"
 fi
 
-# 6. 智能、带优先级地安装常用软件
+# 步骤 6: 智能、带优先级地安装常用软件
 # [CRITICAL STEP - DO NOT MODIFY LOGIC]
-# 此步骤确保优先安装最佳软件，并在失败时有备用选项。
 echo "=================================================="
 echo "步骤 6: 智能、带优先级地安装常用软件"
 echo "=================================================="
@@ -152,15 +147,16 @@ install_best_choice "文件管理器" "thunar"
 install_best_choice "文本编辑器" "mousepad"
 install_best_choice "终端模拟器" "xfce4-terminal"
 
-# 7. 下载并安装 Chrome Remote Desktop
+# 步骤 7: 下载并安装 Chrome Remote Desktop
 echo "=================================================="
 echo "步骤 7: 下载并安装 Chrome Remote Desktop 服务"
 echo "=================================================="
 wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb -O crd.deb
+# [CRITICAL STEP - DO NOT REMOVE 'DEBIAN_FRONTEND']
 DEBIAN_FRONTEND=noninteractive apt-get install -y ./crd.deb
 rm crd.deb
 
-# 8. 自动创建用户
+# 步骤 8: 自动创建用户
 echo "=================================================="
 echo "步骤 8: 自动创建远程桌面专用用户: ${NEW_USER}"
 echo "=================================================="
@@ -174,9 +170,58 @@ fi
 usermod -aG sudo "$NEW_USER"
 usermod -aG chrome-remote-desktop "$NEW_USER"
 
-# 9. 为新用户预配置包含中文环境的桌面会话
+# 步骤 9: [新增功能] 配置密钥环(Keyring)自动解锁，避免弹窗
+# [CRITICAL UX FIX - DO NOT REMOVE]
 echo "=================================================="
-echo "步骤 9: 为用户 ${NEW_USER} 预配置桌面会话脚本"
+echo "步骤 9: 配置密钥环(Keyring)自动解锁以避免弹窗"
+echo "=================================================="
+# 确保相关模块已安装
+apt-get install -y libpam-gnome-keyring
+# 这是针对 Chrome Remote Desktop 的 PAM 配置文件
+PAM_CONFIG="/etc/pam.d/chrome-remote-desktop"
+if [ -f "$PAM_CONFIG" ]; then
+    # 检查是否已配置，避免重复添加
+    if ! grep -q "pam_gnome_keyring.so" "$PAM_CONFIG"; then
+        echo "正在向 $PAM_CONFIG 添加自动解锁配置..."
+        # 在文件末尾追加配置
+        {
+            echo ""
+            echo "# Added by setup script to auto-unlock keyring"
+            echo "auth    optional        pam_gnome_keyring.so"
+            echo "session optional        pam_gnome_keyring.so auto_start"
+        } >> "$PAM_CONFIG"
+        echo "密钥环自动解锁配置成功。"
+    else
+        echo "密钥环自动解锁已配置，跳过。"
+    fi
+else
+    # 如果 CRD 没有创建这个文件（极不可能），则发出警告而不是中断脚本
+    echo "警告: 未找到 PAM 配置文件 $PAM_CONFIG。跳过密钥环配置。"
+fi
+
+# 步骤 10: [新增功能] 为用户禁用终端粘贴警告
+# [CRITICAL UX FIX - DO NOT REMOVE]
+echo "=================================================="
+echo "步骤 10: 为用户 ${NEW_USER} 禁用终端粘贴警告"
+echo "=================================================="
+TERMINAL_CONFIG_DIR="/home/${NEW_USER}/.config/xfce4/terminal"
+TERMINAL_CONFIG_FILE="${TERMINAL_CONFIG_DIR}/terminalrc"
+# 以新用户的身份创建目录，-p 选项确保路径不存在时才创建，且不报错
+su - "${NEW_USER}" -c "mkdir -p '${TERMINAL_CONFIG_DIR}'"
+# 检查配置项是否已存在
+if ! su - "${NEW_USER}" -c "grep -q 'MiscUnsafePasteDialog' '${TERMINAL_CONFIG_FILE}' 2>/dev/null"; then
+    # 如果不存在，则追加
+    su - "${NEW_USER}" -c "echo 'MiscUnsafePasteDialog=FALSE' >> '${TERMINAL_CONFIG_FILE}'"
+    echo "已创建新终端配置以禁用粘贴警告。"
+else
+    # 如果已存在，则用 sed 修改，确保其值为 FALSE
+    su - "${NEW_USER}" -c "sed -i 's/MiscUnsafePasteDialog=.*/MiscUnsafePasteDialog=FALSE/' '${TERMINAL_CONFIG_FILE}'"
+    echo "已更新现有终端配置以禁用粘贴警告。"
+fi
+
+# 步骤 11: 为新用户预配置包含中文环境的桌面会话
+echo "=================================================="
+echo "步骤 11: 为用户 ${NEW_USER} 预配置桌面会话脚本"
 echo "=================================================="
 su -c 'cat <<EOF > /home/'${NEW_USER}'/.chrome-remote-desktop-session
 export LANG=zh_CN.UTF-8
@@ -189,24 +234,23 @@ fcitx5 -d
 exec /usr/bin/startxfce4
 EOF' "${NEW_USER}"
 
-# 10. 统一用户主目录权限
+# 步骤 12: 统一用户主目录权限
 # [CRITICAL STEP - DO NOT REMOVE]
-# 这是解决所有“无法保存设置”问题的根源，确保用户体验。
 echo "=================================================="
-echo "步骤 10: 修正用户 ${NEW_USER} 的主目录文件所有权"
+echo "步骤 12: 修正用户 ${NEW_USER} 的主目录文件所有权"
 echo "=================================================="
 chown -R "${NEW_USER}":"${NEW_USER}" "/home/${NEW_USER}"
 echo "用户主目录权限已成功修正。"
 
-# 11. 清理APT缓存
+# 步骤 13: 清理APT缓存
 echo "=================================================="
-echo "步骤 11: 清理软件包缓存以释放空间"
+echo "步骤 13: 清理软件包缓存以释放空间"
 echo "=================================================="
 apt-get clean
 
-# 12. 执行最终的自动化授权流程
+# 步骤 14: 执行最终的自动化授权流程
 echo "=================================================="
-echo "步骤 12: 执行最终的自动化授权流程"
+echo "步骤 14: 执行最终的自动化授权流程"
 echo "=================================================="
 AUTH_COMMAND_CLEANED=$(echo "$AUTH_COMMAND" | sed 's/DISPLAY=.*start-host/start-host/')
 echo "正在为用户 ${NEW_USER} 自动执行授权..."
