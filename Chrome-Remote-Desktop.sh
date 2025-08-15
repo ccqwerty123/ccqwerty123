@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v12.sh (最终完美版)
-# 脚本功能: 集成桌面初始化设置，全自动处理密钥环(Keyring)弹窗和终端粘贴警告，
+# 脚本名称: setup_debian_xfce_crd_root_v13.sh (最终完美版)
+# 脚本功能: 修复了 Fcitx5 输入法列表为空的问题，并集成所有初始化设置，
 #           实现真正的开箱即用。
-# 版本: 12.0 - 新增密钥环自动解锁和禁用终端粘贴警告的功能。
+# 版本: 13.0 - 明确安装 fcitx5-pinyin 引擎，确保中文输入法可用。
 # 作者: Gemini
 # ==============================================================================
 
@@ -113,7 +113,8 @@ apt-get install -y \
     dbus-x11 \
     locales \
     fonts-noto-cjk \
-    fcitx5 fcitx5-chinese-addons
+    fcitx5 fcitx5-chinese-addons \
+    fcitx5-pinyin # [KEY FIX] 显式安装拼音引擎，确保输入法可用
 
 # 步骤 4: 设置系统全局中文环境
 echo "=================================================="
@@ -175,15 +176,11 @@ usermod -aG chrome-remote-desktop "$NEW_USER"
 echo "=================================================="
 echo "步骤 9: 配置密钥环(Keyring)自动解锁以避免弹窗"
 echo "=================================================="
-# 确保相关模块已安装
 apt-get install -y libpam-gnome-keyring
-# 这是针对 Chrome Remote Desktop 的 PAM 配置文件
 PAM_CONFIG="/etc/pam.d/chrome-remote-desktop"
 if [ -f "$PAM_CONFIG" ]; then
-    # 检查是否已配置，避免重复添加
     if ! grep -q "pam_gnome_keyring.so" "$PAM_CONFIG"; then
         echo "正在向 $PAM_CONFIG 添加自动解锁配置..."
-        # 在文件末尾追加配置
         {
             echo ""
             echo "# Added by setup script to auto-unlock keyring"
@@ -195,7 +192,6 @@ if [ -f "$PAM_CONFIG" ]; then
         echo "密钥环自动解锁已配置，跳过。"
     fi
 else
-    # 如果 CRD 没有创建这个文件（极不可能），则发出警告而不是中断脚本
     echo "警告: 未找到 PAM 配置文件 $PAM_CONFIG。跳过密钥环配置。"
 fi
 
@@ -206,15 +202,11 @@ echo "步骤 10: 为用户 ${NEW_USER} 禁用终端粘贴警告"
 echo "=================================================="
 TERMINAL_CONFIG_DIR="/home/${NEW_USER}/.config/xfce4/terminal"
 TERMINAL_CONFIG_FILE="${TERMINAL_CONFIG_DIR}/terminalrc"
-# 以新用户的身份创建目录，-p 选项确保路径不存在时才创建，且不报错
 su - "${NEW_USER}" -c "mkdir -p '${TERMINAL_CONFIG_DIR}'"
-# 检查配置项是否已存在
 if ! su - "${NEW_USER}" -c "grep -q 'MiscUnsafePasteDialog' '${TERMINAL_CONFIG_FILE}' 2>/dev/null"; then
-    # 如果不存在，则追加
     su - "${NEW_USER}" -c "echo 'MiscUnsafePasteDialog=FALSE' >> '${TERMINAL_CONFIG_FILE}'"
     echo "已创建新终端配置以禁用粘贴警告。"
 else
-    # 如果已存在，则用 sed 修改，确保其值为 FALSE
     su - "${NEW_USER}" -c "sed -i 's/MiscUnsafePasteDialog=.*/MiscUnsafePasteDialog=FALSE/' '${TERMINAL_CONFIG_FILE}'"
     echo "已更新现有终端配置以禁用粘贴警告。"
 fi
