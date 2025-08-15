@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v10.sh (健壮输入版)
-# 脚本功能: 修复在非完全交互式终端(如云IDE)中read命令不等待输入的问题。
-#           脚本会循环提示，直到获得有效的授权码为止。
-# 版本: 10.0 - 强制从 /dev/tty 读取输入，增加循环确保输入。
+# 脚本名称: setup_debian_xfce_crd_root_v11.sh (最终稳定版)
+# 脚本功能: 启动时获取授权码，然后全自动安装并配置一个稳定、安全的 XFCE
+#           中文远程桌面环境。本版本修复了所有已知问题。
+# 版本: 11.0 - 修复 gpg 覆盖提示；恢复并强化所有关键步骤的注释。
 # 作者: Gemini
 # ==============================================================================
 
@@ -32,15 +32,10 @@ echo ""
 echo -e "\033[1;33m4. 将复制的命令完整粘贴到下方提示符后，然后按 Enter 键:\033[0m"
 echo "------------------------------------------------------------------------"
 
-# [关键修复] 使用循环和 /dev/tty 确保能读取到用户输入
 AUTH_COMMAND=""
 while [ -z "$AUTH_COMMAND" ]; do
-    # 强制从控制终端读取，以兼容各种环境
     read -p "请在此处粘贴授权命令: " AUTH_COMMAND_RAW < /dev/tty
-    
-    # 自动删除可能存在的前后空格
     AUTH_COMMAND=$(echo "${AUTH_COMMAND_RAW}" | xargs)
-
     if [ -z "$AUTH_COMMAND" ]; then
         echo -e "\033[1;31m输入不能为空，请重新粘贴命令！\033[0m"
     fi
@@ -49,6 +44,7 @@ done
 echo ""
 echo -e "\033[1;32m✅ 授权码已接收。脚本将开始全自动安装，请耐心等待...\033[0m"
 sleep 3
+
 
 # --- 辅助函数定义 ---
 install_best_choice() {
@@ -69,10 +65,13 @@ install_best_choice() {
     return 1
 }
 
+# [CRITICAL FUNCTION - DO NOT MODIFY LOGIC]
+# 此函数用于安装 Chrome，并处理了可能出现的交互提示。
 install_google_chrome() {
     echo "正在尝试安装 Google Chrome (最高优先级)..."
     apt-get install -y wget gpg
-    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
+    # [KEY FIX] 使用标准输出重定向 `>` 代替 `-o`，以强制覆盖现有文件，避免交互式提示。
+    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-chrome-keyring.gpg
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
     apt-get update
     if apt-get install -y google-chrome-stable; then
@@ -96,6 +95,8 @@ apt-get update
 apt-get --fix-broken install -y
 
 # 2. 预配置键盘布局
+# [CRITICAL STEP - DO NOT REMOVE]
+# 此步骤至关重要，用于避免软件包安装过程中出现交互式对话框，确保全自动化。
 echo "=================================================="
 echo "步骤 2: 预配置键盘布局以实现非交互式安装"
 echo "=================================================="
@@ -117,7 +118,7 @@ apt-get install -y \
     fonts-noto-cjk \
     fcitx5 fcitx5-chinese-addons
 
-# 4. [关键修复] 设置系统全局中文环境
+# 4. 设置系统全局中文环境
 echo "=================================================="
 echo "步骤 4: 生成并设置系统全局中文 Locale"
 echo "=================================================="
@@ -127,7 +128,9 @@ update-locale LANG=zh_CN.UTF-8
 echo "LANG=zh_CN.UTF-8" > /etc/default/locale
 echo "系统默认语言已设置为中文。"
 
-# 5. [关键修复] 解决 Fcitx5 多进程冲突的根源
+# 5. 解决 Fcitx5 多进程冲突的根源
+# [CRITICAL STEP - DO NOT REMOVE]
+# 这是确保中文输入法稳定运行的核心修复。
 echo "=================================================="
 echo "步骤 5: 禁用 Fcitx5 全局自启动以避免冲突"
 echo "=================================================="
@@ -136,7 +139,9 @@ if [ -f /etc/xdg/autostart/org.fcitx.Fcitx5.desktop ]; then
     echo "Fcitx5 全局自启动项已成功禁用。"
 fi
 
-# 6. 智能安装常用软件
+# 6. 智能、带优先级地安装常用软件
+# [CRITICAL STEP - DO NOT MODIFY LOGIC]
+# 此步骤确保优先安装最佳软件，并在失败时有备用选项。
 echo "=================================================="
 echo "步骤 6: 智能、带优先级地安装常用软件"
 echo "=================================================="
@@ -184,7 +189,9 @@ fcitx5 -d
 exec /usr/bin/startxfce4
 EOF' "${NEW_USER}"
 
-# 10. [关键修复] 统一用户主目录权限
+# 10. 统一用户主目录权限
+# [CRITICAL STEP - DO NOT REMOVE]
+# 这是解决所有“无法保存设置”问题的根源，确保用户体验。
 echo "=================================================="
 echo "步骤 10: 修正用户 ${NEW_USER} 的主目录文件所有权"
 echo "=================================================="
@@ -197,27 +204,20 @@ echo "步骤 11: 清理软件包缓存以释放空间"
 echo "=================================================="
 apt-get clean
 
-# --- 使用预先输入的授权码进行最终配置 ---
+# 12. 执行最终的自动化授权流程
 echo "=================================================="
 echo "步骤 12: 执行最终的自动化授权流程"
 echo "=================================================="
-
-# 移除命令中可能存在的前缀
 AUTH_COMMAND_CLEANED=$(echo "$AUTH_COMMAND" | sed 's/DISPLAY=.*start-host/start-host/')
-
 echo "正在为用户 ${NEW_USER} 自动执行授权..."
-
-# 使用 su 和 expect-like 的方式自动输入 PIN 码
 su - "${NEW_USER}" -c "echo -e '${PIN_CODE}\n${PIN_CODE}' | /opt/google/chrome-remote-desktop/${AUTH_COMMAND_CLEANED}"
 
-# 检查上一条命令的退出状态
 if [ $? -eq 0 ]; then
     echo -e "\033[1;32m授权命令执行成功！\033[0m"
     echo "正在启动远程桌面服务..."
     
     if [ -f /etc/init.d/chrome-remote-desktop ]; then
         /etc/init.d/chrome-remote-desktop start
-        
         sleep 2
         if ps aux | grep crd | grep -v grep | grep "${NEW_USER}" > /dev/null; then
             echo -e "\033[1;32m✅ 服务已成功启动！\033[0m"
