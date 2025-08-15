@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: setup_debian_xfce_crd_root_v5.sh (最终版)
+# 脚本名称: setup_debian_xfce_crd_root_v6.sh (修复版)
 # 脚本功能: 以 root 身份运行，通过智能机制 resiliently 安装 XFCE 桌面及
 #           一系列常用软件。优先安装 Google Chrome。为新用户注入完整的
-#           中文语言环境和输入法。结尾提供适配无 systemd 环境的正确操作指南。
-# 版本: 5.0 - 修正了最终的操作指南，并集成了所有已知修复。
+#           中文语言环境和输入法，并彻底解决 Fcitx5 多进程冲突问题。
+# 版本: 6.0 - 修复 Fcitx5 双重启动问题，优化会话脚本。
 # 作者: Gemini
 # ==============================================================================
 
@@ -55,8 +55,8 @@ install_google_chrome() {
 echo "=================================================="
 echo "步骤 1: 更新系统软件包列表并修复任何依赖问题"
 echo "=================================================="
-apt update
-apt --fix-broken install -y
+apt-get update
+apt-get --fix-broken install -y
 
 # 2. 预配置键盘布局
 echo "=================================================="
@@ -71,7 +71,7 @@ EOF
 echo "=================================================="
 echo "步骤 3: 安装 XFCE 桌面、中文支持和核心组件"
 echo "=================================================="
-apt install -y \
+apt-get install -y \
     xfce4 \
     xfce4-goodies \
     task-xfce-desktop \
@@ -79,6 +79,14 @@ apt install -y \
     locales-all \
     fonts-noto-cjk \
     fcitx5 fcitx5-chinese-addons
+
+# FIX: 解决 Fcitx5 多进程冲突的根源
+# Fcitx5 安装后会创建一个全局自启动文件，导致与我们的会话脚本重复启动。
+# 我们将其重命名，从而禁用全局自启动，只保留我们脚本中的启动方式。
+if [ -f /etc/xdg/autostart/org.fcitx.Fcitx5.desktop ]; then
+    echo "禁用 Fcitx5 全局自启动项以避免冲突..."
+    mv /etc/xdg/autostart/org.fcitx.Fcitx5.desktop /etc/xdg/autostart/org.fcitx.Fcitx5.desktop.bak
+fi
 
 # 3.5 智能安装常用软件
 echo "=================================================="
@@ -98,7 +106,7 @@ echo "=================================================="
 echo "步骤 5: 下载并安装 Chrome Remote Desktop 服务"
 echo "=================================================="
 wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-DEBIAN_FRONTEND=noninteractive apt install -y ./chrome-remote-desktop_current_amd64.deb
+DEBIAN_FRONTEND=noninteractive apt-get install -y ./chrome-remote-desktop_current_amd64.deb
 rm chrome-remote-desktop_current_amd64.deb
 
 # 6. 自动创建用户
@@ -119,7 +127,7 @@ usermod -aG chrome-remote-desktop "$NEW_USER"
 echo "=================================================="
 echo "步骤 7: 为用户 ${NEW_USER} 预配置包含中文环境的桌面会话"
 echo "=================================================="
-# 这个多行配置会强制会话使用中文并启动输入法
+# 这个多行配置会强制会话使用中文并以正确方式启动输入法
 su -c 'cat <<EOF > /home/'${NEW_USER}'/.chrome-remote-desktop-session
 export LANG=zh_CN.UTF-8
 export LANGUAGE=zh_CN:zh
@@ -127,8 +135,10 @@ export LC_ALL=zh_CN.UTF-8
 export GTK_IM_MODULE=fcitx
 export QT_IM_MODULE=fcitx
 export XMODIFIERS=@im=fcitx
-fcitx5 &
-exec /etc/X11/Xsession /usr/bin/xfce4-session
+# FIX: 使用官方推荐的守护进程模式启动 fcitx5
+fcitx5 -d
+# FIX: 使用标准的 XFCE 启动脚本
+exec /usr/bin/startxfce4
 EOF' "${NEW_USER}"
 
 # --- 脚本完成 ---
@@ -158,7 +168,8 @@ echo "6. (可选) 检查服务是否在后台运行："
 echo -e "   \033[1;32mps aux | grep crd\033[0m"
 echo "   (看到有 'deskuser' 用户的进程就代表成功了)"
 echo ""
-echo -e "7. \033[1;32m现在，一切就绪！\033[0m 打开浏览器访问远程桌面，即可连接。"
+echo -e "7. \033[1;32m现在，一切就绪！\033[0m 打开浏览器访问下面的链接，即可连接。"
+echo -e "   \033[1;34mhttps://remotedesktop.google.com/access?pli=1\033[0m"
 echo "------------------------------------------------------------------"
 echo "注意：声音问题是当前环境的限制，无法解决。但图形界面和中文环境已配置完毕。"
 echo "========================================================================"
