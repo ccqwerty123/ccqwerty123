@@ -3,13 +3,15 @@
 
 `wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/Chrome-Remote-Desktop.sh | sudo bash`    Chrome-Remote-Desktop 远程控制安装
 
+`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/minimal_desktop.sh | sudo bash` 精简版远程桌面
+
 `wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash`  复杂版
 安装远程桌面，直接运行，预览8080端口，点击vnc_auto.html@ 打开浏览器
 
 `wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash`
 全自动完成 KeyHunt 和 BitCrack 的安装与验证
 
-`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_miners_ultimate.sh | sudo bash && wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash && sudo apt update && sudo apt install -y python3-psutil`  一键完成安装远程桌面,KeyHunt 和 BitCrack 的安装与验证
+`wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/minimal_desktop.sh | sudo bash && wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/desktop_no_password.sh | sudo bash && sudo apt update && sudo apt install -y python3-psutil`  一键完成安装远程桌面,KeyHunt 和 BitCrack 的安装与验证
 
 `wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3`
 管道运行 KeyHunt 和 BitCrack
