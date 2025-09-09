@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>随机小姐姐视频</title>
+    <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiB2aWV3Qm94PSIwIDAgMTYgMTYiPjxwYXRoIGZpbGw=" type="image/svg+xml">
+    <style>
+        :root {
+            --theme-color: #ffc107; /* 主题色 - 黄色 */
+            --theme-color-dark: #e0a800;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        html, body {
+            height: 100%; width: 100%; overflow: hidden;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            background-color: #000; touch-action: none;
+        }
+        
+        .player-container {
+            position: relative; width: 100%; height: 100%;
+            display: flex; align-items: center; justify-content: center;
+        }
+        
+        .video-container {
+            position: relative; width: 100vw; height: 100vh;
+            overflow: hidden; background: #000; cursor: pointer;
+        }
+        
+        .video-wrapper { width: 100%; height: 100%; }
+        
+        video {
+            display: block; width: 100%; height: 100%;
+            object-fit: cover; background: #000;
+            /* 变换的原点设置为中心 */
+            transform-origin: center center;
+            transition: transform 0.2s ease-out; /* For pinch-zoom */
+        }
+        
+        video::-webkit-media-controls { display: none !important; }
+
+        .controls {
+            position: absolute; bottom: 80px; right: 10px; z-index: 20;
+            display: flex; flex-direction: column; gap: 20px;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.3s ease-in-out;
+        }
+        .controls.visible { opacity: 1; pointer-events: auto; }
+        
+        button {
+            background-color: var(--theme-color); color: #333; border: none;
+            padding: 8px 12px; border-radius: 6px; cursor: pointer;
+            font-size: 0.8rem; font-weight: bold; transition: all 0.2s ease;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4); user-select: none;
+            min-width: 80px; text-align: center;
+        }
+        button:hover { transform: scale(1.05); }
+        button:active { transform: scale(0.95); background-color: var(--theme-color-dark); }
+        
+        .loading {
+            display: flex; align-items: center; justify-content: center;
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85); z-index: 15;
+        }
+        
+        .spinner {
+            width: 60px; height: 60px; border: 5px solid rgba(255, 193, 7, 0.3);
+            border-radius: 50%; border-top-color: var(--theme-color);
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* --- Settings & Source Modal Styles --- */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(5px);
+            z-index: 100; display: flex; justify-content: center; align-items: center;
+            opacity: 0; visibility: hidden; transition: opacity 0.3s, visibility 0.3s;
+        }
+        .modal-overlay.visible { opacity: 1; visibility: visible; }
+        .modal-content {
+            background: rgba(40, 40, 40, 0.9); padding: 20px; border-radius: 12px;
+            width: 90%; max-width: 400px; max-height: 80vh; overflow-y: auto; color: #fff;
+            transform: scale(0.95); transition: transform 0.3s;
+        }
+        .modal-overlay.visible .modal-content { transform: scale(1); }
+        
+        .modal-list { list-style: none; margin-top: 15px; }
+        .modal-list li {
+            padding: 12px; border-bottom: 1px solid #444; cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+            transition: background-color 0.2s;
+        }
+        .modal-list li:hover { background-color: #333; }
+        .modal-list li.active { color: var(--theme-color); font-weight: bold; }
+        .modal-list li:last-child { border-bottom: none; }
+        .delete-source-btn {
+            background: #e74c3c; color: white; border: none; border-radius: 5px;
+            padding: 4px 8px; font-size: 0.7rem;
+        }
+
+        .settings-item { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #444; }
+        .settings-item:last-child { border-bottom: none; }
+        .volume-slider { width: 60%; }
+        #autoplayToggle.enabled { background-color: #28a745; color: white; }
+
+        #addSourceForm { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+        #addSourceForm input { padding: 10px; border-radius: 5px; border: 1px solid #555; background: #333; color: #fff; }
+        #formActions { display: flex; gap: 10px; justify-content: flex-end; }
+    </style>
+</head>
+<body>
+    <div class="player-container">
+        <div class="video-container" id="videoContainer">
+            <div class="loading" id="loading"><div class="spinner"></div></div>
+            <div class="video-wrapper" id="videoWrapper">
+                <video id="videoPlayer" playsinline preload="auto"></video>
+            </div>
+        </div>
+        <div class="controls" id="controls">
+            <button id="changeSourceBtn">随机源</button>
+            <button id="reloadBtn">下一个</button>
+            <button id="settingsBtn">...</button>
+        </div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal-content">
+            <h3>设置</h3>
+            <div class="settings-item">
+                <span>下载视频</span>
+                <button id="downloadBtn">下载</button>
+            </div>
+            <div class="settings-item">
+                <span>音量</span>
+                <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="1">
+            </div>
+            <div class="settings-item">
+                <span>自动连播</span>
+                <button id="autoplayToggle">关闭</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Source Modal -->
+    <div class="modal-overlay" id="sourceModal">
+        <div class="modal-content">
+            <h3>选择视频源</h3>
+            <ul class="modal-list" id="sourceList"></ul>
+            <button id="openAddSourceFormBtn" style="margin-top: 15px; width: 100%;">添加新源</button>
+            <form id="addSourceForm" style="display: none;">
+                <input type="text" id="sourceNameInput" placeholder="源名称 (例如: 高清小姐姐)" required>
+                <input type="url" id="sourceUrlInput" placeholder="源URL地址" required>
+                <div id="formActions">
+                    <button type="button" id="cancelAddSourceBtn">取消</button>
+                    <button type="submit">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // --- DOM Elements ---
+            const videoPlayer = document.getElementById('videoPlayer');
+            const videoContainer = document.getElementById('videoContainer');
+            const controls = document.getElementById('controls');
+            const reloadBtn = document.getElementById('reloadBtn');
+            const changeSourceBtn = document.getElementById('changeSourceBtn');
+            const settingsBtn = document.getElementById('settingsBtn');
+            const settingsModal = document.getElementById('settingsModal');
+            const downloadBtn = document.getElementById('downloadBtn');
+            const volumeSlider = document.getElementById('volumeSlider');
+            const autoplayToggle = document.getElementById('autoplayToggle');
+            const loading = document.getElementById('loading');
+            const sourceModal = document.getElementById('sourceModal');
+            const sourceList = document.getElementById('sourceList');
+            const openAddSourceFormBtn = document.getElementById('openAddSourceFormBtn');
+            const addSourceForm = document.getElementById('addSourceForm');
+            const cancelAddSourceBtn = document.getElementById('cancelAddSourceBtn');
+
+            // --- State Variables ---
+            let autoPlayEnabled = false;
+            let currentSource = 'random';
+            let controlsTimer;
+
+            // --- Zoom & Pan State ---
+            let scale = 1;
+            let translateX = 0;
+            let translateY = 0;
+            let isDragging = false;
+            let lastDragX, lastDragY;
+            
+            // --- Data ---
+            const DEFAULT_SOURCES = [
+                { name: 'hssp', url: 'http://api.xingchenfu.xyz/API/hssp.php' }, { name: 'wmsc', url: 'http://api.xingchenfu.xyz/API/wmsc.php' },
+                { name: 'tianmei', url: 'http://api.xingchenfu.xyz/API/tianmei.php' }, { name: 'cdxl', url: 'http://api.xingchenfu.xyz/API/cdxl.php' },
+                { name: 'yzxl', url: 'http://api.xingchenfu.xyz/API/yzxl.php' }, { name: 'rwsp', url: 'http://api.xingchenfu.xyz/API/rwsp.php' },
+                { name: 'nvgao', url: 'http://api.xingchenfu.xyz/API/nvgao.php' }, { name: 'nvda', url: 'http://api.xingchenfu.xyz/API/nvda.php' },
+                { name: 'ndym', url: 'http://api.xingchenfu.xyz/API/ndym.php' }, { name: 'bsxl', url: 'http://api.xingchenfu.xyz/API/bsxl.php' },
+                { name: 'zzxjj', url: 'http://api.xingchenfu.xyz/API/zzxjj.php' }, { name: 'jk', url: 'http://api.xingchenfu.xyz/API/jk.php' },
+                { name: 'meinv', url: 'https://v2.xxapi.cn/api/meinv?return=302' }, { name: 'jxhssp', url: 'https://api.jkyai.top/API/jxhssp.php' },
+                { name: 'jxbssp', url: 'https://api.jkyai.top/API/jxbssp.php' }, { name: 'xjj', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=xjj' },
+                { name: 'jkllt', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=jkllt' }, { name: 'llxl', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=llxl' },
+                { name: 'mhy', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=mhy' }, { name: 'ndym-2', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=ndym' },
+                { name: 'rwsp-2', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=rwsp' }, { name: 'sbkl', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=sbkl' },
+                { name: 'yz', url: 'https://www.yx520.ltd/API/xjj/api.php?msg=yz' }
+            ];
+            let allSources = [];
+
+            // --- Core Video Logic ---
+            const showLoading = () => loading.style.display = 'flex';
+            const hideLoading = () => loading.style.display = 'none';
+            
+            function getVideoUrl() {
+                const source = currentSource === 'random' 
+                    ? allSources[Math.floor(Math.random() * allSources.length)]
+                    : allSources.find(s => s.url === currentSource);
+                
+                const url = source ? source.url : allSources[0].url;
+                const separator = url.includes('?') ? '&' : '?';
+                return `${url}${separator}t=${Date.now()}`;
+            }
+
+            function loadNextVideo() {
+                showLoading();
+                resetTransform();
+                videoPlayer.src = getVideoUrl();
+                videoPlayer.loop = !autoPlayEnabled;
+                videoPlayer.play().catch(()=>{});
+            }
+
+            // --- UI & Controls Logic ---
+            function showControls() {
+                clearTimeout(controlsTimer);
+                controls.classList.add('visible');
+            }
+
+            function hideControls() {
+                controls.classList.remove('visible');
+            }
+
+            function toggleControls() {
+                if (controls.classList.contains('visible')) {
+                    hideControls();
+                } else {
+                    showControls();
+                    controlsTimer = setTimeout(hideControls, 3000); // 3秒后自动隐藏
+                }
+            }
+
+            function togglePlayPause() {
+                videoPlayer.paused ? videoPlayer.play() : videoPlayer.pause();
+            }
+
+            // --- Transform Logic ---
+            function updateTransform() {
+                // 限制平移范围，防止视频被完全拖出视野
+                const maxTranslateX = (scale - 1) * videoPlayer.clientWidth / 2;
+                const maxTranslateY = (scale - 1) * videoPlayer.clientHeight / 2;
+
+                translateX = Math.max(-maxTranslateX, Math.min(maxTranslateX, translateX));
+                translateY = Math.max(-maxTranslateY, Math.min(maxTranslateY, translateY));
+                
+                videoPlayer.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+            }
+
+            function resetTransform() {
+                scale = 1;
+                translateX = 0;
+                translateY = 0;
+                updateTransform();
+            }
+            
+            // --- Device-Specific Controls Initialization ---
+            const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+            if (isTouchDevice) {
+                initMobileControls();
+            } else {
+                initPcControls();
+            }
+
+            function initMobileControls() {
+                let touchStartX, touchStartY, isSwiping, initialPinchDistance = 0, startScale = 1;
+                let lastTapTime = 0, tapCount = 0;
+
+                videoContainer.addEventListener('touchstart', e => {
+                    if (e.target.closest('.modal-overlay') || e.target.closest('.controls')) return;
+                    
+                    if (e.touches.length === 1) {
+                        touchStartX = e.touches[0].clientX;
+                        touchStartY = e.touches[0].clientY;
+                        isSwiping = false;
+
+                        if (scale > 1) {
+                            isDragging = true;
+                            lastDragX = touchStartX;
+                            lastDragY = touchStartY;
+                        }
+                    } else if (e.touches.length === 2) {
+                        e.preventDefault();
+                        isDragging = false; // 双指操作时停止拖动
+                        initialPinchDistance = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY
+                        );
+                        startScale = scale;
+                    }
+                });
+
+                videoContainer.addEventListener('touchmove', e => {
+                    if (e.target.closest('.modal-overlay') || e.target.closest('.controls')) return;
+                    e.preventDefault();
+
+                    if (e.touches.length === 1 && isDragging) {
+                        const deltaX = e.touches[0].clientX - lastDragX;
+                        const deltaY = e.touches[0].clientY - lastDragY;
+                        translateX += deltaX;
+                        translateY += deltaY;
+                        lastDragX = e.touches[0].clientX;
+                        lastDragY = e.touches[0].clientY;
+                        updateTransform();
+                    } else if (e.touches.length === 1 && !isDragging) {
+                         // 只有当没有拖动时，才判断为滑动切换
+                        const deltaX = Math.abs(e.touches[0].clientX - touchStartX);
+                        const deltaY = Math.abs(e.touches[0].clientY - touchStartY);
+                        if (deltaY > 10 && deltaY > deltaX) isSwiping = true;
+                    } else if (e.touches.length === 2) {
+                        const newPinchDistance = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY
+                        );
+                        scale = Math.max(1, startScale * (newPinchDistance / initialPinchDistance));
+                        updateTransform();
+                    }
+                });
+
+                videoContainer.addEventListener('touchend', e => {
+                    if (e.touches.length > 0) return; // 还有手指在屏幕上
+
+                    isDragging = false;
+                    
+                    // --- 手势判断 ---
+                    const touchEndX = e.changedTouches[0].clientX;
+                    const touchEndY = e.changedTouches[0].clientY;
+                    const deltaX = touchEndX - touchStartX;
+                    const deltaY = touchEndY - touchStartY;
+                    const absDeltaX = Math.abs(deltaX);
+                    const absDeltaY = Math.abs(deltaY);
+
+                    // 1. 判断为滑动 (移动距离超过阈值)
+                    if (isSwiping && absDeltaY > 50 && absDeltaY > absDeltaX) {
+                        loadNextVideo();
+                        return;
+                    }
+
+                    // 2. 如果不是滑动，判断为点击/双击
+                    if (absDeltaX < 10 && absDeltaY < 10) {
+                        tapCount++;
+                        setTimeout(() => {
+                            if (tapCount === 1) { // 单击
+                                toggleControls();
+                            } else if (tapCount === 2) { // 双击
+                                togglePlayPause();
+                            }
+                            tapCount = 0;
+                        }, 250); // 250ms内再次点击算双击
+                    }
+                });
+            }
+
+            function initPcControls() {
+                videoContainer.addEventListener('click', e => {
+                    if (e.target.closest('.controls') || e.target.closest('.modal-overlay')) return;
+                    togglePlayPause();
+                    showControls();
+                    controlsTimer = setTimeout(hideControls, 2000);
+                });
+
+                 videoContainer.addEventListener('mousedown', e => {
+                    if (scale > 1) {
+                        e.preventDefault();
+                        isDragging = true;
+                        lastDragX = e.clientX;
+                        lastDragY = e.clientY;
+                        videoContainer.style.cursor = 'grabbing';
+                    }
+                });
+
+                videoContainer.addEventListener('mousemove', e => {
+                    if (isDragging) {
+                        const deltaX = e.clientX - lastDragX;
+                        const deltaY = e.clientY - lastDragY;
+                        translateX += deltaX;
+                        translateY += deltaY;
+                        lastDragX = e.clientX;
+                        lastDragY = e.clientY;
+                        updateTransform();
+                    }
+                });
+
+                document.addEventListener('mouseup', () => {
+                    isDragging = false;
+                    videoContainer.style.cursor = 'pointer';
+                });
+                 videoContainer.addEventListener('mouseleave', () => {
+                    isDragging = false;
+                     videoContainer.style.cursor = 'pointer';
+                });
+
+                document.addEventListener('wheel', e => {
+                    if (e.target.closest('.modal-overlay')) return;
+                    
+                    if (e.ctrlKey) { // Ctrl + 滚轮缩放
+                        e.preventDefault();
+                        const scaleAmount = -e.deltaY * 0.001;
+                        scale = Math.max(1, scale * (1 + scaleAmount));
+                        updateTransform();
+                    } else { // 正常滚轮切换
+                        if (e.deltaY !== 0) loadNextVideo();
+                    }
+                });
+
+                document.addEventListener('keydown', e => {
+                    if (e.target.tagName === 'INPUT') return;
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') loadNextVideo();
+                    if (e.key === ' ') { e.preventDefault(); togglePlayPause(); }
+                });
+            }
+            
+            // --- Source & Settings Modal Logic ---
+            function loadSources() {
+                const customSources = JSON.parse(localStorage.getItem('customVideoSources')) || [];
+                allSources = [...DEFAULT_SOURCES, ...customSources.map(s => ({...s, isCustom: true}))];
+            }
+
+            function saveCustomSources(customSources) {
+                localStorage.setItem('customVideoSources', JSON.stringify(customSources));
+                loadSources();
+                populateSourceList();
+            }
+
+            function populateSourceList() {
+                sourceList.innerHTML = '';
+                const randomLi = document.createElement('li');
+                randomLi.textContent = '🎲 随机源';
+                randomLi.dataset.url = 'random';
+                if (currentSource === 'random') randomLi.classList.add('active');
+                sourceList.appendChild(randomLi);
+
+                allSources.forEach(source => {
+                    const li = document.createElement('li');
+                    li.dataset.url = source.url;
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = source.name;
+                    li.appendChild(nameSpan);
+                    if (source.isCustom) {
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.textContent = '删除';
+                        deleteBtn.className = 'delete-source-btn';
+                        deleteBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            if (confirm(`确定要删除源 "${source.name}" 吗？`)) {
+                                let customs = JSON.parse(localStorage.getItem('customVideoSources')) || [];
+                                saveCustomSources(customs.filter(s => s.url !== source.url));
+                            }
+                        };
+                        li.appendChild(deleteBtn);
+                    }
+                    if (currentSource === source.url) li.classList.add('active');
+                    sourceList.appendChild(li);
+                });
+            }
+            
+            function setupModals() {
+                settingsBtn.onclick = () => settingsModal.classList.add('visible');
+                changeSourceBtn.onclick = () => {
+                    populateSourceList();
+                    sourceModal.classList.add('visible');
+                };
+                reloadBtn.onclick = loadNextVideo;
+
+                [settingsModal, sourceModal].forEach(modal => {
+                    modal.onclick = e => { if (e.target === modal) modal.classList.remove('visible'); };
+                });
+
+                downloadBtn.onclick = () => {
+                    alert('正在尝试下载... 请注意浏览器可能会阻止弹窗。');
+                    fetch(videoPlayer.src)
+                        .then(response => {
+                            if (!response.ok) throw new Error('网络响应失败，可能存在跨域保护(CORS)。');
+                            return response.blob();
+                        })
+                        .then(blob => {
+                            const link = document.createElement('a');
+                            link.href = URL.createObjectURL(blob);
+                            link.download = `video_${Date.now()}.mp4`;
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                            URL.revokeObjectURL(link.href);
+                        }).catch(err => alert(`下载失败: ${err.message}`));
+                };
+
+                volumeSlider.oninput = e => videoPlayer.volume = e.target.value;
+                
+                autoplayToggle.onclick = () => {
+                    autoPlayEnabled = !autoPlayEnabled;
+                    videoPlayer.loop = !autoPlayEnabled;
+                    autoplayToggle.textContent = autoPlayEnabled ? '开启' : '关闭';
+                    autoplayToggle.classList.toggle('enabled', autoPlayEnabled);
+                };
+
+                sourceList.onclick = (e) => {
+                    const li = e.target.closest('li');
+                    if (!li || !li.dataset.url) return;
+                    currentSource = li.dataset.url;
+                    const source = allSources.find(s => s.url === currentSource);
+                    changeSourceBtn.textContent = source ? source.name.substring(0, 4) : '随机源'; // 按钮只显示前4个字
+                    sourceModal.classList.remove('visible');
+                    loadNextVideo();
+                };
+
+                openAddSourceFormBtn.onclick = () => { addSourceForm.style.display = 'flex'; openAddSourceFormBtn.style.display = 'none'; };
+                cancelAddSourceBtn.onclick = () => { addSourceForm.style.display = 'none'; openAddSourceFormBtn.style.display = 'block'; addSourceForm.reset(); };
+                addSourceForm.onsubmit = (e) => {
+                    e.preventDefault();
+                    const name = document.getElementById('sourceNameInput').value.trim();
+                    const url = document.getElementById('sourceUrlInput').value.trim();
+                    if (!name || !url) return;
+                    let customs = JSON.parse(localStorage.getItem('customVideoSources')) || [];
+                    if (customs.some(s => s.url === url)) { alert('这个URL地址已经存在了！'); return; }
+                    customs.push({ name, url });
+                    saveCustomSources(customs);
+                    cancelAddSourceBtn.click();
+                };
+            }
+            
+            // --- Player Event Listeners ---
+            videoPlayer.addEventListener('loadeddata', hideLoading);
+            videoPlayer.addEventListener('ended', () => autoPlayEnabled && loadNextVideo());
+            videoPlayer.addEventListener('error', () => setTimeout(loadNextVideo, 1000));
+            
+            // --- Initialization ---
+            function init() {
+                loadSources();
+                setupModals();
+                loadNextVideo();
+            }
+            init();
+        });
+    </script>
+</body>
+</html>
