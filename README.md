@@ -25,6 +25,20 @@
 `bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/x-ui.sh 2> /dev/null)`
 
 x-ui重启
+
+
+使用索引号修改 IPv6 的 MTU 值
+`ping baidu.com -f -l 1472`
+`netsh interface ipv4 show interfaces`
+
+`netsh interface ipv4 set subinterface 36 mtu=1360 store=persistent`
+
+`netsh interface ipv6 show interfaces`
+
+`netsh interface ipv6 set subinterface 36 mtu=1350 store=persistent`
+`netsh interface ipv6 set subinterface 12 mtu=1350 store=persistent`
+
+
 <!--
 **ccqwerty123/ccqwerty123** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
