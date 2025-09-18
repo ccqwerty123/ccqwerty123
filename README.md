@@ -16,7 +16,7 @@
 `wget -qO- wget -qO- https://github.com/ccqwerty123/ccqwerty123/raw/refs/heads/main/main_controller.py | sudo python3`
 管道运行 KeyHunt 和 BitCrack
 
-`sudo apt update && sudo apt install -y python3-psutil` 安装psutil依赖
+`sudo apt update && sudo apt install -y python3-psutil` 安装psutil依赖    sudo rm /etc/apt/sources.list.d/modular-installer.list
 
 `bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)`
 
