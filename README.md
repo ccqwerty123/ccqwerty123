@@ -18,6 +18,8 @@
 
 `sudo apt update && sudo apt install -y python3-psutil` 安装psutil依赖    sudo rm /etc/apt/sources.list.d/modular-installer.list
 
+`wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_jlab_run.sh | sudo bash`  安装并启动 JupyterLab
+
 `bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)`
 
 服务器优化
