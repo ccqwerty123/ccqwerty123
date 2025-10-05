@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 INDEX_URL=${INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
 
-# 升级 pip（走清华源）
+# 升级 pip（走清华源）  安装并启动 JupyterLab
 python3 -m pip install -U pip -i "$INDEX_URL"
 
 # 安装 JupyterLab + 中文包 + LSP + Python 内核（走清华源）
