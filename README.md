@@ -20,6 +20,8 @@
 
 `wget -O - https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/setup_jlab_run.sh | sudo bash`  安装并启动 JupyterLab
 
+`wget -qO- wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/detect_hw.py | sudo python3`  服务器cpu显卡检查
+
 `bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/server-net-optimize.sh 2> /dev/null)`
 
 服务器优化
