@@ -3,29 +3,43 @@ set -Eeuo pipefail
 trap 'echo "[ERROR] exit=$? line=$LINENO: $BASH_COMMAND" >&2' ERR
 
 # ========= 可调参数（可用环境变量覆盖） =========
-PROFILE="${PROFILE:-1}"                 # 1=Jupyter(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
+PROFILE="${PROFILE:-1}"                 # 1=Jupyter直连(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
 INDEX_URL="${INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 PORT="${PORT:-8888}"                    # Jupyter 后端端口
 FRONT_PORT="${FRONT_PORT:-8080}"        # 反代对外端口(仅模式2/3)
 ROOT_DIR="${ROOT_DIR:-$PWD}"
 EXTRA_JUPYTER_ARGS="${EXTRA_JUPYTER_ARGS:-}"
+USE_SYSTEM_PIP="${USE_SYSTEM_PIP:-0}"   # 1=强行用系统pip（会加 --break-system-packages；不推荐）
+
+# venv 默认路径（root用 /opt，普通用户用 $HOME/.local）
+if [[ $EUID -eq 0 ]]; then
+  DEFAULT_VENV_DIR="/opt/jlab-venv"
+else
+  DEFAULT_VENV_DIR="$HOME/.local/jlab-venv"
+fi
+VENV_DIR="${VENV_DIR:-$DEFAULT_VENV_DIR}"
 
 # ========= 工具函数 =========
-log() { echo "[INFO] $*"; }
+log()  { echo "[INFO] $*"; }
 warn() { echo "[WARN] $*" >&2; }
-die() { echo "[FAIL] $*" >&2; exit 1; }
+die()  { echo "[FAIL] $*" >&2; exit 1; }
 
 detect_pkg_mgr() {
   if command -v apt-get >/dev/null 2>&1; then
+    PKG_MGR=apt
     PKG_INSTALL='apt-get update -y && apt-get install -y'
   elif command -v dnf >/dev/null 2>&1; then
+    PKG_MGR=dnf
     PKG_INSTALL='dnf install -y'
   elif command -v yum >/dev/null 2>&1; then
+    PKG_MGR=yum
     PKG_INSTALL='yum install -y'
   elif command -v apk >/dev/null 2>&1; then
+    PKG_MGR=apk
     PKG_INSTALL='apk add --no-cache'
   else
-    die "未识别的包管理器，请手动安装依赖（nginx/caddy/python3-pip）。"
+    PKG_MGR=unknown
+    PKG_INSTALL='echo'
   fi
 }
 
@@ -33,25 +47,68 @@ ensure_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"
 }
 
-# ========= 安装 Python/Jupyter =========
-install_python_stack() {
+# ========= 准备 Python/venv =========
+prepare_python_env() {
   ensure_cmd python3
-  # 确保 pip 存在
-  python3 -m pip --version >/dev/null 2>&1 || python3 -m ensurepip --upgrade || true
 
-  log "升级 pip（清华源）并安装 JupyterLab + 中文 + LSP + 内核"
-  python3 -m pip install -U pip -i "$INDEX_URL"
-  python3 -m pip install -U \
-    jupyterlab \
-    jupyterlab-language-pack-zh-CN \
-    jupyterlab-lsp \
-    jedi-language-server \
-    ipykernel \
-    -i "$INDEX_URL"
+  if [[ "$USE_SYSTEM_PIP" == "1" ]]; then
+    log "使用系统 pip（将启用 --break-system-packages，可能影响系统Python）"
+    PIP_BREAK="--break-system-packages"
+    PYTHON_BIN="$(command -v python3)"
+    PIP_BIN="$PYTHON_BIN -m pip"
+    JUPYTER_BIN="$(command -v jupyter || true)"
+  else
+    log "创建/复用 venv: $VENV_DIR"
+    mkdir -p "$VENV_DIR"
+    # 直接尝试创建 venv；失败再按发行版补包
+    if ! python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
+      detect_pkg_mgr
+      case "$PKG_MGR" in
+        apt)  bash -lc "$PKG_INSTALL python3-venv";;
+        apk)  bash -lc "$PKG_INSTALL python3 py3-virtualenv";;
+        dnf|yum) bash -lc "$PKG_INSTALL python3";;   # venv 通常随 python3 自带
+        *) warn "无法自动安装 venv 依赖，请手动确保 'python3 -m venv' 可用";;
+      esac
+      python3 -m venv "$VENV_DIR"
+    fi
+
+    PYTHON_BIN="$VENV_DIR/bin/python"
+    PIP_BIN="$VENV_DIR/bin/pip"
+    JUPYTER_BIN="$VENV_DIR/bin/jupyter"
+
+    # 确保 venv 内有 pip
+    "$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+}
+
+# ========= 安装 Jupyter 到 venv 或系统（取决于上一步） =========
+install_python_stack() {
+  if [[ "$USE_SYSTEM_PIP" == "1" ]]; then
+    log "系统环境安装 Jupyter（带 $PIP_BREAK）"
+    $PIP_BIN install -U pip setuptools wheel -i "$INDEX_URL" $PIP_BREAK
+    $PIP_BIN install -U \
+      jupyterlab \
+      jupyterlab-language-pack-zh-CN \
+      jupyterlab-lsp \
+      jedi-language-server \
+      ipykernel \
+      -i "$INDEX_URL" $PIP_BREAK
+  else
+    log "在 venv 安装 Jupyter（不触碰系统Python）"
+    "$PIP_BIN" install -U pip setuptools wheel -i "$INDEX_URL"
+    "$PIP_BIN" install -U \
+      jupyterlab \
+      jupyterlab-language-pack-zh-CN \
+      jupyterlab-lsp \
+      jedi-language-server \
+      ipykernel \
+      -i "$INDEX_URL"
+  fi
 }
 
 # ========= 写入/启用 Nginx 配置 =========
 install_nginx_and_config() {
+  [[ $EUID -eq 0 ]] || die "模式2需要 root (安装/写入 /etc/nginx)。"
   detect_pkg_mgr
   if ! command -v nginx >/dev/null 2>&1; then
     log "安装 Nginx..."
@@ -161,13 +218,13 @@ NGX
 
   log "检测并重载 Nginx 配置..."
   nginx -t
-  # 尝试启动并重载（兼容不同发行版/环境）
   systemctl enable --now nginx 2>/dev/null || service nginx start || nginx || true
   systemctl reload nginx 2>/dev/null || nginx -s reload || service nginx reload || true
 }
 
 # ========= 写入/启用 Caddy 配置 =========
 install_caddy_and_config() {
+  [[ $EUID -eq 0 ]] || die "模式3需要 root (安装/写入 /etc/caddy)。"
   detect_pkg_mgr
   if ! command -v caddy >/dev/null 2>&1; then
     log "安装 Caddy..."
@@ -207,7 +264,7 @@ start_jupyter() {
   fi
 
   log "启动 JupyterLab（模式=${PROFILE}，端口=${PORT}，目录=${ROOT_DIR}）"
-  exec jupyter lab \
+  exec "$JUPYTER_BIN" lab \
     --allow-root \
     --ip="$bind_ip" \
     --port="$PORT" \
@@ -224,27 +281,24 @@ start_jupyter() {
 
 # ========= 主流程 =========
 main() {
-  [[ $EUID -eq 0 ]] || warn "建议以 root/sudo 运行（安装 Nginx/Caddy 需要权限）。"
-
+  [[ $PROFILE =~ ^[123]$ ]] || die "不支持的 PROFILE=${PROFILE}，请用 1/2/3"
+  prepare_python_env
   install_python_stack
 
   case "$PROFILE" in
     1)
-      log "模式1: 仅 Jupyter（内网优化，直连 0.0.0.0:${PORT})"
+      log "模式1：仅 Jupyter（内网优化，直连 0.0.0.0:${PORT})"
       start_jupyter "0.0.0.0"
       ;;
     2)
-      log "模式2: Jupyter + Nginx（侦听 :${FRONT_PORT}, 上游 127.0.0.1:${PORT})"
+      log "模式2：Jupyter + Nginx（侦听 :${FRONT_PORT}，上游 127.0.0.1:${PORT})"
       install_nginx_and_config
       start_jupyter "127.0.0.1"
       ;;
     3)
-      log "模式3: Jupyter + Caddy（侦听 :${FRONT_PORT}, 上游 127.0.0.1:${PORT})"
+      log "模式3：Jupyter + Caddy（侦听 :${FRONT_PORT}，上游 127.0.0.1:${PORT})"
       install_caddy_and_config
       start_jupyter "127.0.0.1"
-      ;;
-    *)
-      die "不支持的 PROFILE=${PROFILE}，请用 1/2/3"
       ;;
   esac
 }
