@@ -2,32 +2,28 @@
 set -Eeuo pipefail
 trap 'echo "[ERROR] exit=$? line=$LINENO: $BASH_COMMAND" >&2' ERR
 
-# ========= 可调参数（也可在运行时通过同名环境变量覆盖） =========
-PROFILE="${PROFILE:-1}"        # 1=Jupyter直连(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
+# ========= 可调参数（可用环境变量覆盖） =========
+PROFILE="${PROFILE:-1}"                 # 1=Jupyter(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
 INDEX_URL="${INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-PORT="${PORT:-8888}"           # Jupyter 后端端口
-FRONT_PORT="${FRONT_PORT:-8080}"   # 反向代理对外端口(仅模式2/3)
+PORT="${PORT:-8888}"                    # Jupyter 后端端口
+FRONT_PORT="${FRONT_PORT:-8080}"        # 反代对外端口(仅模式2/3)
 ROOT_DIR="${ROOT_DIR:-$PWD}"
 EXTRA_JUPYTER_ARGS="${EXTRA_JUPYTER_ARGS:-}"
 
-# ========= 小工具函数 =========
-log() { echo -e "[INFO] $*"; }
-warn() { echo -e "[WARN] $*" >&2; }
-die() { echo -e "[FAIL] $*" >&2; exit 1; }
+# ========= 工具函数 =========
+log() { echo "[INFO] $*"; }
+warn() { echo "[WARN] $*" >&2; }
+die() { echo "[FAIL] $*" >&2; exit 1; }
 
 detect_pkg_mgr() {
   if command -v apt-get >/dev/null 2>&1; then
     PKG_INSTALL='apt-get update -y && apt-get install -y'
-    PKG_SVC_RELOAD='systemctl daemon-reload || true'
   elif command -v dnf >/dev/null 2>&1; then
     PKG_INSTALL='dnf install -y'
-    PKG_SVC_RELOAD='systemctl daemon-reload || true'
   elif command -v yum >/dev/null 2>&1; then
     PKG_INSTALL='yum install -y'
-    PKG_SVC_RELOAD='systemctl daemon-reload || true'
   elif command -v apk >/dev/null 2>&1; then
     PKG_INSTALL='apk add --no-cache'
-    PKG_SVC_RELOAD='true'
   else
     die "未识别的包管理器，请手动安装依赖（nginx/caddy/python3-pip）。"
   fi
@@ -40,6 +36,9 @@ ensure_cmd() {
 # ========= 安装 Python/Jupyter =========
 install_python_stack() {
   ensure_cmd python3
+  # 确保 pip 存在
+  python3 -m pip --version >/dev/null 2>&1 || python3 -m ensurepip --upgrade || true
+
   log "升级 pip（清华源）并安装 JupyterLab + 中文 + LSP + 内核"
   python3 -m pip install -U pip -i "$INDEX_URL"
   python3 -m pip install -U \
@@ -60,7 +59,6 @@ install_nginx_and_config() {
   fi
   mkdir -p /var/cache/nginx/jupyter_static
 
-  # 生成配置（放在 conf.d，通常被 http {} 引用）
   cat >/etc/nginx/conf.d/jupyter.conf <<NGX
 map \$http_upgrade \$connection_upgrade {
     default upgrade;
@@ -72,7 +70,6 @@ upstream jupyter_upstream {
     keepalive 64;
 }
 
-# 代理缓存路径，仅缓存静态资源
 proxy_cache_path /var/cache/nginx/jupyter_static levels=1:2
                  keys_zone=jupyter_static:64m max_size=1g inactive=7d
                  use_temp_path=off;
@@ -162,15 +159,11 @@ server {
 }
 NGX
 
-  # 目录权限（尽力处理，无则忽略）
-  local_nginx_user="$(awk '/^user/ {print $2}' /etc/nginx/nginx.conf 2>/dev/null | tr -d ';' || true)"
-  local_nginx_user="${local_nginx_user:-www-data}"
-  chown -R "$local_nginx_user":"$local_nginx_user" /var/cache/nginx/jupyter_static 2>/dev/null || true
-
   log "检测并重载 Nginx 配置..."
   nginx -t
-  systemctl enable --now nginx 2>/dev/null || service nginx start || true
-  systemctl reload nginx 2>/dev/null || service nginx reload || true
+  # 尝试启动并重载（兼容不同发行版/环境）
+  systemctl enable --now nginx 2>/dev/null || service nginx start || nginx || true
+  systemctl reload nginx 2>/dev/null || nginx -s reload || service nginx reload || true
 }
 
 # ========= 写入/启用 Caddy 配置 =========
@@ -178,7 +171,6 @@ install_caddy_and_config() {
   detect_pkg_mgr
   if ! command -v caddy >/dev/null 2>&1; then
     log "安装 Caddy..."
-    # 尝试直接安装（多数发行版有包）
     bash -lc "$PKG_INSTALL caddy" || die "安装 Caddy 失败，请改用模式2(Nginx)或手动安装 Caddy。"
   fi
 
@@ -206,7 +198,7 @@ CADDY
   caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl restart caddy || true
 }
 
-# ========= 启动 Jupyter（根据模式拼参数） =========
+# ========= 启动 Jupyter =========
 start_jupyter() {
   local bind_ip="$1"
   local extra=()
@@ -222,10 +214,7 @@ start_jupyter() {
     --ServerApp.root_dir="$ROOT_DIR" \
     --ServerApp.token='' \
     --ServerApp.password='' \
-    --ServerApp.tornado_settings='{
-      "compress_response": false,
-      "static_cache_max_age": 2592000
-    }' \
+    --ServerApp.tornado_settings="{'compress_response': False, 'static_cache_max_age': 2592000}" \
     --ServerApp.iopub_data_rate_limit=1000000000 \
     --ServerApp.rate_limit_window=3.0 \
     --ServerApp.websocket_max_message_size=209715200 \
@@ -235,22 +224,22 @@ start_jupyter() {
 
 # ========= 主流程 =========
 main() {
-  [[ $EUID -eq 0 ]] || warn "建议以 root 运行（安装 Nginx/Caddy 需要 root）。"
+  [[ $EUID -eq 0 ]] || warn "建议以 root/sudo 运行（安装 Nginx/Caddy 需要权限）。"
 
   install_python_stack
 
   case "$PROFILE" in
     1)
-      log "模式1：仅 Jupyter（内网优化，直连 0.0.0.0:${PORT)）"
+      log "模式1: 仅 Jupyter（内网优化，直连 0.0.0.0:${PORT})"
       start_jupyter "0.0.0.0"
       ;;
     2)
-      log "模式2：Jupyter + Nginx（Nginx侦听 :${FRONT_PORT}，上游 127.0.0.1:${PORT}）"
+      log "模式2: Jupyter + Nginx（侦听 :${FRONT_PORT}, 上游 127.0.0.1:${PORT})"
       install_nginx_and_config
       start_jupyter "127.0.0.1"
       ;;
     3)
-      log "模式3：Jupyter + Caddy（Caddy侦听 :${FRONT_PORT}，上游 127.0.0.1:${PORT}）"
+      log "模式3: Jupyter + Caddy（侦听 :${FRONT_PORT}, 上游 127.0.0.1:${PORT})"
       install_caddy_and_config
       start_jupyter "127.0.0.1"
       ;;
@@ -260,4 +249,4 @@ main() {
   esac
 }
 
-main
+main "$@"
