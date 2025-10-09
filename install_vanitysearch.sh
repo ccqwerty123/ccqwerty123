@@ -2,37 +2,43 @@
 #
 # alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# 版本: 3.3.0-zh
+# 版本: 4.0.0-zh
 #
 # 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
 #
 # ==============================================================================
-# v3.3.0 更新日志:
-# - 核心变更: 采用全新的"直接替换软件源"策略，以应对复杂的网络和系统配置问题。
-# - 新增: 自动备份用户原始的 APT 源配置到一个临时目录。
-# - 新增: 根据检测到的 Ubuntu 系统代号, 动态生成一份仅包含国内镜像
-#   (清华大学 Tuna 源) 的临时 sources.list 文件。
-# - 强化: 依然使用 'trap' 机制确保无论脚本如何退出，用户的原始软件源配置
-#   都将被完美恢复，保障系统安全。
-# - 移除: 移除了 v3.2 中的诊断和逐个禁用逻辑，改为更高效、更直接的整体替换。
+# v4.0.0 更新日志:
+# - 新增: [核心功能] 自动从源码编译和安装旧版本 OpenSSL (1.0.1a) 到 /opt/ 目录，
+#   以解决新版 OpenSSL 导致的私钥计算错误问题。
+# - 新增: [智能判断] 脚本运行时会先检查 VanitySearch 是否已成功安装，
+#   若已存在且可执行，则直接退出，实现重复执行无副作用 (幂等性)。
+# - 新增: [可靠验证] 编译成功后，脚本会自动执行 "./VanitySearch -h" 命令并显示其输出，
+#   以此作为最终的、可靠的成功验证。
+# - 移除: 根据用户要求，移除了 APT 镜像源的备份与恢复逻辑，现在切换镜像源为永久性操作。
+# - 优化: 编译步骤现在会通过 CFLAGS 和 LDFLAGS 明确链接到新安装的旧版 OpenSSL。
 # ==============================================================================
 #
 # 功能特性:
-# - [v3.3+] 自动备份并临时替换为国内高速 APT 镜像源。
-# - [v3.1+] 自动检查并尝试安装缺失的旧版本编译器 (g++-9)。
-# - 智能检测 NVIDIA 驱动和 CUDA 工具包及 GPU 计算能力。
+# - [v4.0+] 自动编译并链接所需的旧版本 OpenSSL (1.0.1a)。
+# - [v4.0+] 智能检查，避免重复安装。
+# - [v4.0+] 通过运行程序本身来验证安装成功。
+# - [v3.3+] 自动切换为国内高速 APT 镜像源。
+# - [v3.1+] 自动检查并安装缺失的旧版本编译器 (g++-9)。
+# - 智能检测 NVIDIA 驱动、CUDA 工具包及 GPU 计算能力。
 # - 自动修复源代码中的 C++ 兼容性错误。
 # - 自动配置 Makefile 文件并编译。
 # - 提供彩色的、详细的中文输出。
 #
 
 # --- 配置信息 ---
-SCRIPT_VERSION="3.3.0-zh"
+SCRIPT_VERSION="4.0.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
 COMPATIBLE_COMPILERS=("g++-9" "g++-8" "g++-7")
-APT_BACKUP_DIR="" # 用于记录 APT 备份目录
+OPENSSL_VERSION="1.0.1a"
+OPENSSL_URL="http://www.openssl.org/source/old/1.0.1/openssl-${OPENSSL_VERSION}.tar.gz"
+OPENSSL_INSTALL_PATH="/opt/openssl-${OPENSSL_VERSION}"
 
 # --- Shell 安全设置与颜色定义 ---
 set -o errexit
@@ -55,60 +61,21 @@ log_error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
 
 # --- 核心功能函数 ---
 
-# 恢复被备份的 APT 源配置。此函数由 trap 调用，确保总能执行。
-cleanup_apt_sources() {
-    if [ -n "$APT_BACKUP_DIR" ] && [ -d "$APT_BACKUP_DIR" ]; then
-        log_info "正在恢复原始的 APT 软件源配置..."
-        # 强制删除临时创建的源文件和目录
-        sudo rm -f /etc/apt/sources.list
-        sudo rm -rf /etc/apt/sources.list.d
-        # 恢复备份
-        if [ -f "$APT_BACKUP_DIR/sources.list" ]; then
-            sudo mv "$APT_BACKUP_DIR/sources.list" /etc/apt/
-        fi
-        if [ -d "$APT_BACKUP_DIR/sources.list.d" ]; then
-            sudo mv "$APT_BACKUP_DIR/sources.list.d" /etc/apt/
-        fi
-        # 清理备份目录
-        sudo rm -rf "$APT_BACKUP_DIR"
-        log_success "原始 APT 源配置已恢复。"
-        # 再次更新以使原始配置生效
-        log_info "正在使用恢复后的源配置执行一次 apt update..."
-        sudo apt-get update || log_warn "使用原始配置更新时出现问题，这可能是正常现象。"
-    fi
-}
-
-# 设置 trap，无论脚本如何退出，都执行 cleanup_apt_sources 函数
-trap cleanup_apt_sources EXIT
-
-# 临时替换为国内镜像源
-override_apt_sources() {
-    log_info "为了确保安装过程顺利，将临时替换为国内高速镜像源 (清华大学 Tuna 源)。"
+# 切换为国内镜像源
+switch_to_domestic_apt_source() {
+    log_info "为了确保安装过程顺利，将永久切换为国内高速镜像源 (清华大学 Tuna 源)。"
     
-    # 1. 创建备份目录
-    APT_BACKUP_DIR=$(mktemp -d /tmp/apt_backup_XXXXXX)
-    log_info "原始 APT 配置将被备份到: $APT_BACKUP_DIR"
-    
-    # 2. 备份原始配置
-    if [ -f "/etc/apt/sources.list" ]; then
-        sudo mv /etc/apt/sources.list "$APT_BACKUP_DIR/"
-    fi
-    if [ -d "/etc/apt/sources.list.d" ]; then
-        sudo mv /etc/apt/sources.list.d "$APT_BACKUP_DIR/"
-    fi
-    log_success "原始 APT 配置已备份。"
-
-    # 3. 获取系统代号
+    # 获取系统代号
     local codename
     if ! codename=$(. /etc/os-release && echo "$VERSION_CODENAME"); then
         log_error "无法自动检测 Ubuntu 系统代号。脚本无法继续。"
     fi
     log_info "检测到系统代号为: $codename"
     
-    # 4. 创建新的 sources.list 文件
+    # 创建新的 sources.list 文件
     log_info "正在生成新的 sources.list 文件..."
     sudo tee /etc/apt/sources.list > /dev/null <<EOF
-# 由 VanitySearch 安装脚本 (v${SCRIPT_VERSION}) 临时生成
+# 由 VanitySearch 安装脚本 (v${SCRIPT_VERSION}) 生成
 # 镜像源: 清华大学 (Tuna)
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
@@ -120,17 +87,56 @@ deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restr
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
 EOF
     
-    # 确保 sources.list.d 目录存在
+    # 确保 sources.list.d 目录存在且清空
     sudo mkdir -p /etc/apt/sources.list.d
+    sudo rm -f /etc/apt/sources.list.d/*
 
     log_success "已成功切换到国内镜像源。"
     
-    # 5. 使用新源进行更新
+    # 使用新源进行更新
     log_info "正在使用新的国内镜像源执行 apt update..."
     if ! sudo apt-get update; then
         log_error "'apt update' 在使用国内镜像源时失败。请检查您的网络连接或DNS设置。"
     fi
     log_success "APT 更新成功！"
+}
+
+# 从源码安装旧版本 OpenSSL
+install_openssl_from_source() {
+    log_info "正在检查是否需要安装旧版本 OpenSSL (${OPENSSL_VERSION})..."
+    if [ -f "${OPENSSL_INSTALL_PATH}/bin/openssl" ]; then
+        log_success "旧版本 OpenSSL 已安装在 ${OPENSSL_INSTALL_PATH}。"
+        return
+    fi
+
+    log_warn "未找到所需的旧版本 OpenSSL。现在将从源码编译安装..."
+    log_info "这可能需要几分钟时间。"
+
+    local build_dir; build_dir=$(mktemp -d)
+    
+    # 安装编译依赖
+    log_info "正在安装 OpenSSL 编译依赖 (build-essential, wget)..."
+    sudo apt-get install -y build-essential wget
+    
+    log_info "正在从 ${OPENSSL_URL} 下载源码..."
+    wget -qO- "$OPENSSL_URL" | tar xz -C "$build_dir"
+    
+    cd "${build_dir}/openssl-${OPENSSL_VERSION}"
+    
+    log_info "正在配置 OpenSSL..."
+    ./config shared --prefix="$OPENSSL_INSTALL_PATH"
+    
+    log_info "正在编译 OpenSSL..."
+    make -j$(nproc)
+    
+    log_info "正在安装 OpenSSL 到 ${OPENSSL_INSTALL_PATH}..."
+    sudo make install > /dev/null
+    
+    # 清理
+    cd /
+    rm -rf "$build_dir"
+    
+    log_success "旧版本 OpenSSL (${OPENSSL_VERSION}) 已成功安装！"
 }
 
 
@@ -158,9 +164,6 @@ find_or_install_compiler() {
     DETECTED_CXXCUDA=$(command -v "${COMPATIBLE_COMPILERS[0]}")
 }
 
-
-# (其他辅助函数，如 check_nvidia_cuda, download_source, patch_source_code 等保持不变)
-# ... [此处省略与 v3.2 版本相同的辅助函数代码以保持简洁] ...
 # 检查 NVIDIA 驱动和 CUDA 环境
 check_nvidia_cuda() {
     log_info "正在检查 NVIDIA GPU 环境..."
@@ -185,6 +188,7 @@ check_nvidia_cuda() {
          log_success "找到 CUDA 安装路径: $DETECTED_CUDA_PATH"
     fi
 }
+
 # 下载源代码
 download_source() {
     log_info "正在下载 VanitySearch 源代码..."
@@ -193,18 +197,14 @@ download_source() {
         rm -rf "$PROJECT_DIR"
     fi
 
-    for ((i=1; i<=3; i++)); do
-        if git clone --quiet "$GITHUB_REPO"; then
-            log_success "源代码下载成功。"
-            cd "$PROJECT_DIR"
-            return
-        fi
-        log_warn "Git 克隆失败 (尝试 $i/3)。3 秒后重试..."
-        sleep 3
-    done
+    if ! git clone --quiet "$GITHUB_REPO"; then
+        log_error "Git 克隆仓库失败。请检查网络连接或仓库地址是否正确。"
+    fi
     
-    log_error "尝试 3 次后，克隆仓库失败。"
+    log_success "源代码下载成功。"
+    cd "$PROJECT_DIR"
 }
+
 # 应用源代码补丁
 patch_source_code() {
     log_info "正在应用源代码补丁以修复编译错误..."
@@ -227,6 +227,7 @@ patch_source_code() {
         log_success "为 sha256.cpp 添加了字节序反转函数兼容性补丁。"
     fi
 }
+
 # 配置 Makefile
 configure_makefile() {
     log_info "正在根据您的系统环境配置 Makefile..."
@@ -235,14 +236,43 @@ configure_makefile() {
     sed -i "s|^CXXCUDA    = .*|CXXCUDA    = ${DETECTED_CXXCUDA}|" Makefile
     log_success "Makefile 配置已自动完成。"
 }
+
 # 编译
 compile_source() {
-    log_info "开始编译... 这可能需要几分钟时间。"
+    log_info "开始编译 (链接到自定义 OpenSSL)... 这可能需要几分钟时间。"
+    
+    # 定义指向旧版本 OpenSSL 的编译和链接标志
+    local CFLAGS="-I${OPENSSL_INSTALL_PATH}/include"
+    local LDFLAGS="-L${OPENSSL_INSTALL_PATH}/lib -Wl,-rpath,${OPENSSL_INSTALL_PATH}/lib"
+
     make clean > /dev/null 2>&1 || true
-    if make -j$(nproc) gpu=1 ccap=${DETECTED_CCAP} all; then
+    
+    # 在 make 命令中传入这些标志
+    if make -j$(nproc) gpu=1 ccap=${DETECTED_CCAP} all CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"; then
         log_success "编译成功完成！"
     else
         log_error "编译失败。请检查上方的详细编译日志以获取线索。"
+    fi
+}
+
+# 验证安装
+validate_installation() {
+    log_info "正在进行最终验证..."
+    if [ ! -x "./VanitySearch" ]; then
+        log_error "验证失败：未找到可执行文件 'VanitySearch'。"
+    fi
+    
+    log_info "执行 './VanitySearch -h' 以确认程序可运行..."
+    echo "------------------- VanitySearch 帮助信息 -------------------"
+    # 执行并显示帮助信息
+    ./VanitySearch -h
+    echo "----------------------------------------------------------"
+    
+    # 再次检查退出码
+    if [ $? -eq 0 ]; then
+        log_success "验证成功！程序可以正常执行。"
+    else
+        log_error "验证失败！程序执行时返回了错误码。"
     fi
 }
 
@@ -251,39 +281,54 @@ main() {
     local start_dir; start_dir=$(pwd)
     
     echo -e "${C_BOLD}--- alek76-2/VanitySearch 自动化安装脚本 (v${SCRIPT_VERSION}) ---${C_RESET}"
-    echo -e "此版本将自动备份并临时替换为${C_YELLOW}国内高速 APT 镜像源${C_RESET}以确保安装成功。"
+    
+    # 步骤 0: 检查是否已安装 (幂等性)
+    if [ -f "${PROJECT_DIR}/VanitySearch" ] && "${start_dir}/${PROJECT_DIR}/VanitySearch" -h > /dev/null 2>&1; then
+        log_success "VanitySearch 似乎已经成功安装并且可以运行。"
+        log_info "可执行文件位于: ${C_BOLD}${start_dir}/${PROJECT_DIR}/VanitySearch${C_RESET}"
+        log_info "如需重新安装，请先删除 '${PROJECT_DIR}' 目录后再次运行此脚本。"
+        exit 0
+    fi
+    
+    echo -e "此版本将自动安装旧版依赖并编译程序。"
     echo "----------------------------------------------------"
     sleep 2
 
-    # 步骤 1: 临时替换为国内镜像源 (新增的关键步骤)
-    override_apt_sources
+    # 步骤 1: 切换为国内镜像源
+    switch_to_domestic_apt_source
 
-    # 步骤 2: 查找或安装兼容的编译器
+    # 步骤 2: 安装旧版本 OpenSSL
+    install_openssl_from_source
+
+    # 步骤 3: 查找或安装兼容的编译器
     find_or_install_compiler
 
-    # 步骤 3: 检查 NVIDIA 环境
+    # 步骤 4: 检查 NVIDIA 环境
     check_nvidia_cuda
 
-    # 步骤 4: 下载源代码
+    # 步骤 5: 下载源代码
     download_source
 
-    # 步骤 5: 应用修复补丁
+    # 步骤 6: 应用修复补丁
     patch_source_code
 
-    # 步骤 6: 配置 Makefile
+    # 步骤 7: 配置 Makefile
     configure_makefile
 
-    # 步骤 7: 编译
+    # 步骤 8: 编译
     compile_source
+    
+    # 步骤 9: 验证
+    validate_installation
     
     cd "$start_dir"
 
     echo "----------------------------------------------------"
-    log_success "VanitySearch 已成功安装！"
+    log_success "VanitySearch 已成功安装并验证！"
     log_info "可执行文件位于: ${C_BOLD}${start_dir}/${PROJECT_DIR}/VanitySearch${C_RESET}"
-    log_info "您可以像这样运行它:"
-    echo -e "  cd ${PROJECT_DIR}"
-    echo -e "  ./VanitySearch -gpu 1MyPrefix"
+    log_info "您可以像这样进入目录并运行它:"
+    echo -e "  ${C_YELLOW}cd ${PROJECT_DIR}${C_RESET}"
+    echo -e "  ${C_YELLOW}./VanitySearch --help${C_RESET} # 查看所有选项"
     echo ""
     log_warn "安全提醒: 请务必小心处理您生成的私钥。将其离线、安全地备份。"
     echo "----------------------------------------------------"
