@@ -71,11 +71,50 @@ require_root_or_sudo
 # Step 1: 修正 APT 源并更新（带回退）
 # =========================
 fix_apt_sources() {
-  # 备份现有 APT 源
+
+  # 内部辅助函数：强制解锁 APT 系统
+  # 检测并终止卡住的 apt/dpkg 进程，然后清理锁文件。
+  force_unlock_apt() {
+    info "正在检查 APT 系统锁..."
+    # 使用 fuser 查找占用锁文件的进程 PID
+    # 优先检查 dpkg 锁，这是最底层的锁
+    local lock_pid
+    lock_pid=$(sudo fuser /var/lib/dpkg/lock 2>/dev/null) || lock_pid=$(sudo fuser /var/lib/apt/lists/lock 2>/dev/null)
+
+    if [ -n "$lock_pid" ]; then
+      warn "检测到 APT 锁被进程 ${lock_pid} 占用！正在尝试自动修复..."
+      
+      # 强制终止持有锁的进程
+      info "正在终止进程: ${lock_pid}..."
+      sudo_run kill -9 "${lock_pid}"
+      sleep 1 # 等待进程完全退出
+
+      # 移除残留的锁文件
+      info "正在移除残留的锁文件..."
+      sudo_run rm -f /var/lib/apt/lists/lock
+      sudo_run rm -f /var/lib/dpkg/lock
+      sudo_run rm -f /var/lib/dpkg/lock-frontend
+      
+      # 修复可能中断的包配置
+      info "正在重新配置 dpkg..."
+      sudo_run dpkg --configure -a
+      
+      info "APT 系统解锁成功。"
+    else
+      info "APT 系统状态正常，未发现锁占用。"
+    fi
+  }
+
+  # --- 主逻辑开始 ---
+
+  # 1. 首先，调用解锁函数，确保 apt 系统可用
+  force_unlock_apt
+
+  # 2. 备份现有 APT 源
   info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
   sudo_run cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
 
-  # 写入国内镜像源（清华大学 TUNA 源）
+  # 3. 写入国内镜像源（清华大学 TUNA 源）
   info "写入国内镜像源（清华大学 TUNA 源）..."
   sudo_run bash -c "cat > '${APT_LIST}'" <<EOF
 # 默认注释了源码镜像，以提高 apt update 速度，如有需要可自行取消注释
@@ -89,7 +128,7 @@ deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security mai
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
-  # 更新软件包列表，增加额外参数提高成功率
+  # 4. 更新软件包列表，增加额外参数提高成功率
   info "apt-get update（3 次重试）..."
   # -o Acquire::Check-Valid-Until=false  <-- 避免因容器时间不准导致源验证失败
   retry 3 sudo_run apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || die "apt-get update 失败，请检查网络或更换其他国内源重试。"
