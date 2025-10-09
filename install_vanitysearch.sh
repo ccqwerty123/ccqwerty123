@@ -70,13 +70,12 @@ require_root_or_sudo
 # =========================
 # Step 1: 修正 APT 源并更新（带回退）
 # =========================
+
 #
-#
-#
-# 自动修复并更新 APT 源的函数 (v5.0 - 禁用所有第三方源，釜底抽薪版)
+# 自动修复并更新 APT 源的函数 (v5.1 - 修复 grep + set -e 导致的脚本中止问题)
 #
 fix_apt_sources() {
-  local version="5.0"
+  local version="5.1"
   echo "[INFO] 运行 fix_apt_sources 函数 (版本: ${version})..."
 
   # --- 1. 权限检查 ---
@@ -85,69 +84,73 @@ fix_apt_sources() {
     exit 1
   fi
 
-  # 内部辅助函数：强制解锁 APT 系统 (v4.0 已验证有效)
+  # 内部辅助函数：强制解锁 APT 系统
   force_unlock_apt() {
     echo "[INFO] 正在检查并强制解锁 APT 系统..."
+    
+    # 【关键修复】在命令末尾加上 '|| true'
+    # 这样即使 grep 找不到任何进程（正常情况），命令也会返回成功（0），
+    # 防止 set -e 模式下脚本异常退出。
     local pids
-    pids=$(ps aux | grep -E 'apt|dpkg' | grep -v grep | awk '{print $2}')
+    pids=$(ps aux | grep -E 'apt|dpkg' | grep -v grep | awk '{print $2}' || true)
+
     if [ -n "$pids" ]; then
       echo "[WARN] 检测到 APT/DPKG 锁被以下进程占用: ${pids}"
       echo "[INFO] 正在强制终止这些进程..."
-      echo "${pids}" | xargs kill -9 >/dev/null 2>&1
+      echo "${pids}" | xargs kill -9
       sleep 1
+      echo "[INFO] 旧进程已终止。"
     fi
+    
+    echo "[INFO] 正在清理所有已知的锁文件..."
     rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend
-    dpkg --configure -a >/dev/null 2>&1
+      
+    echo "[INFO] 正在尝试重新配置 dpkg..."
+    dpkg --configure -a
+      
     echo "[INFO] APT 系统解锁/清理操作完成。"
   }
 
   # --- 主逻辑开始 ---
 
-  # 2. 调用解锁函数
-  force_unlock_apt
+  # 2. 调用解锁函数，并检查其是否成功
+  if ! force_unlock_apt; then
+      echo "[ERR ] APT 系统解锁失败，安装中止。" >&2
+      exit 1
+  fi
 
-  # --- 新增步骤：禁用所有第三方源 ---
+  # 3. 禁用所有第三方源
   local sources_d_dir="/etc/apt/sources.list.d"
   if [ -d "${sources_d_dir}" ] && [ -n "$(ls -A ${sources_d_dir})" ]; then
     echo "[INFO] 检测到第三方源。正在备份并禁用它们..."
     local backup_dir="${sources_d_dir}.bak.$(date +%s)"
-    mv "${sources_d_dir}" "${backup_dir}" || { echo "[ERR ] 无法备份第三方源目录！" >&2; exit 1; }
+    mv "${sources_d_dir}" "${backup_dir}"
     mkdir "${sources_d_dir}"
     echo "[INFO] 所有第三方源已备份至 ${backup_dir} 并禁用。"
-  else
-    echo "[INFO] 未检测到第三方源，跳过禁用步骤。"
   fi
-  # --- 新增步骤结束 ---
 
-  # 3. 备份并覆盖主源文件
+  # 4. 备份并覆盖主源文件
   echo "[INFO] 备份现有主源文件到 /etc/apt/sources.list.bak.$(date +%s)"
   mv /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%s) || true
 
-  # 4. 写入我们指定的国内源
+  # 5. 写入纯净的国内源
   echo "[INFO] 写入纯净的国内源（清华大学 TUNA 源）..."
   bash -c "cat > /etc/apt/sources.list" <<EOF
-# 由安装脚本于 $(date) 生成
+# 由安装脚本于 $(date) 生成 (v${version})
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
-  # 5. 更新软件包列表
-  echo "[INFO] 在纯净源环境下执行 apt-get update（3 次重试）..."
-  retry() {
-    local n=1; local max=$1; shift
-    while true; do
-      "$@" && break || {
-        if [[ $n -lt $max ]]; then ((n++)); echo "[WARN] 命令失败，$n/$max 次重试..."; sleep 1; else return 1; fi
-      }
-    done
-  }
-  
-  retry 3 apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || { echo "[ERR ] apt-get update 最终失败！请检查网络。" >&2; exit 1; }
+  # 6. 更新软件包列表
+  echo "[INFO] 在纯净源环境下执行 apt-get update..."
+  apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || { echo "[ERR ] apt-get update 最终失败！请检查网络。" >&2; exit 1; }
   
   echo "[INFO] APT 源与更新准备就绪。"
 }
+
+
 fix_apt_sources
 
 # =========================
