@@ -1,33 +1,37 @@
 #!/bin/bash
 #
-# A robust, automated installer script for alek76-2/VanitySearch.
+# alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# This script is designed to be run via a pipe, e.g.:
+# 版本: 2.0.0-zh
+#
+# 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
 #
-# Features:
-# - Automatic dependency checking (git, build-essential, libssl-dev).
-# - Intelligent detection of NVIDIA drivers and CUDA Toolkit.
-# - Automatic detection of GPU Compute Capability (ccap).
-# - In-place configuration of the Makefile.
-# - Retry logic for network operations.
-# - Colored, verbose output for better user experience.
-# - Fails safely with clear instructions if requirements are not met.
+# 功能特性:
+# - 自动检查依赖项 (git, build-essential, libssl-dev)。
+# - 智能检测 NVIDIA 驱动和 CUDA 工具包。
+# - 自动检测 GPU 的计算能力 (Compute Capability, ccap)。
+# - 自动修复 'uint32_t' 未定义的编译错误。
+# - 自动配置 Makefile 文件。
+# - 为网络操作提供重试逻辑。
+# - 提供彩色的、详细的中文输出，提升用户体验。
+# - 在环境不满足要求时，会安全失败并给出清晰的中文指引。
 #
 
-# --- Configuration ---
+# --- 配置信息 ---
+SCRIPT_VERSION="2.0.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
 REQUIRED_CMDS=("git" "g++" "make")
 REQUIRED_HEADERS=("/usr/include/openssl/ssl.h")
 MAX_RETRIES=3
 
-# --- Shell Safety and Color Definitions ---
-set -o errexit  # Exit immediately if a command exits with a non-zero status.
-set -o nounset  # Treat unset variables as an error when substituting.
-set -o pipefail # Return value of a pipeline is the value of the last command to exit with a non-zero status.
+# --- Shell 安全设置与颜色定义 ---
+set -o errexit  # 如果任何命令以非零状态退出，则立即退出脚本。
+set -o nounset  # 将未设置的变量视为错误。
+set -o pipefail # 管道命令的返回值将是最后一个以非零状态退出的命令的返回值。
 
-# Colors
+# 颜色定义
 C_RESET='\033[0m'
 C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
@@ -35,180 +39,203 @@ C_YELLOW='\033[0;33m'
 C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 
-# --- Logging Functions ---
+# --- 日志函数 ---
 log_info() {
-    echo -e "${C_CYAN}[INFO]${C_RESET} $1"
+    echo -e "${C_CYAN}[信息]${C_RESET} $1"
 }
 log_success() {
-    echo -e "${C_GREEN}[SUCCESS]${C_RESET} ${C_BOLD}$1${C_RESET}"
+    echo -e "${C_GREEN}[成功]${C_RESET} ${C_BOLD}$1${C_RESET}"
 }
 log_warn() {
-    echo -e "${C_YELLOW}[WARNING]${C_RESET} $1"
+    echo -e "${C_YELLOW}[警告]${C_RESET} $1"
 }
 log_error() {
-    echo -e "${C_RED}[ERROR]${C_RESET} $1" >&2
+    echo -e "${C_RED}[错误]${C_RESET} $1" >&2
     exit 1
 }
 
-# --- Core Functions ---
+# --- 核心功能函数 ---
 
-# Function to check for required system commands and libraries.
+# 检查系统所需的基础命令和库文件。
 check_dependencies() {
-    log_info "Checking for required system dependencies..."
+    log_info "正在检查系统基础依赖项..."
     
     for cmd in "${REQUIRED_CMDS[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
-            log_error "Command '$cmd' not found. Please install it. On Debian/Ubuntu, try: sudo apt install build-essential git"
+            log_error "命令 '$cmd' 未找到。请先安装它。在 Debian/Ubuntu 系统上, 请尝试: sudo apt install build-essential git"
         fi
     done
 
     for header in "${REQUIRED_HEADERS[@]}"; do
         if [ ! -f "$header" ]; then
-            log_error "Header file '$header' not found. Please install the OpenSSL development library. On Debian/Ubuntu, try: sudo apt install libssl-dev"
+            log_error "头文件 '$header' 未找到。请安装 OpenSSL 开发库。在 Debian/Ubuntu 系统上, 请尝试: sudo apt install libssl-dev"
         fi
     done
     
-    log_success "All basic dependencies are installed."
+    log_success "所有基础依赖项均已安装。"
 }
 
-# Function to check for NVIDIA driver and CUDA toolkit, and detect properties.
+# 检查 NVIDIA 驱动和 CUDA 环境, 并检测相关属性。
 check_nvidia_cuda() {
-    log_info "Checking for NVIDIA GPU environment..."
+    log_info "正在检查 NVIDIA GPU 环境..."
 
     if ! command -v nvidia-smi &>/dev/null; then
-        log_error "NVIDIA driver not found. 'nvidia-smi' command failed. Please install the appropriate NVIDIA drivers for your GPU and restart."
+        log_error "未找到 NVIDIA 驱动。'nvidia-smi' 命令执行失败。请为您的 GPU 安装合适的 NVIDIA 官方驱动并重启系统。"
     fi
-    log_success "NVIDIA driver detected."
+    log_success "已检测到 NVIDIA 驱动。"
 
     if ! command -v nvcc &>/dev/null; then
-        log_error "NVIDIA CUDA Toolkit not found. 'nvcc' command failed. Please install the CUDA Toolkit from the NVIDIA website."
+        log_error "未找到 NVIDIA CUDA 工具包。'nvcc' 命令执行失败。请从 NVIDIA 官网下载并安装 CUDA Toolkit。"
     fi
     local cuda_version
     cuda_version=$(nvcc --version | grep "release" | sed 's/.*release \([^,]*\).*/\1/')
-    log_success "NVIDIA CUDA Toolkit detected (Version: $cuda_version)."
+    log_success "已检测到 NVIDIA CUDA 工具包 (版本: $cuda_version)。"
 
-    # Automatically detect the compute capability
-    log_info "Detecting GPU Compute Capability (ccap)..."
+    # 自动检测 GPU 计算能力 (ccap)
+    log_info "正在检测 GPU 计算能力 (ccap)..."
     local compute_cap
     compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
     if [ -z "$compute_cap" ]; then
-        log_error "Could not determine GPU Compute Capability. Please check your 'nvidia-smi' installation."
+        log_error "无法确定 GPU 计算能力。请检查您的 'nvidia-smi' 是否工作正常。"
     fi
-    # Convert from "8.6" to "86" format for the Makefile
+    # 将 "8.6" 格式转换为 Makefile 所需的 "86" 格式
     DETECTED_CCAP=$(echo "$compute_cap" | tr -d '.')
-    log_success "Detected GPU Compute Capability: $compute_cap (ccap=${DETECTED_CCAP})"
+    log_success "检测到 GPU 计算能力: $compute_cap (对应的 ccap值为 ${DETECTED_CCAP})"
     
-    # Attempt to find a suitable g++ compiler path
+    # 尝试寻找一个合适的 g++ 编译器路径
     if command -v g++-7 &>/dev/null; then
         DETECTED_CXXCUDA="/usr/bin/g++-7"
     elif command -v g++-8 &>/dev/null; then
         DETECTED_CXXCUDA="/usr/bin/g++-8"
     else
         DETECTED_CXXCUDA=$(command -v g++)
-        log_warn "Could not find a specific older g++ version (like g++-7). Using the system default at '$DETECTED_CXXCUDA'. If compilation fails, you may need to install a CUDA-compatible g++ version."
+        log_warn "未找到特定的旧版本 g++ (如 g++-7)。将使用系统默认版本 '$DETECTED_CXXCUDA'。如果编译失败, 您可能需要手动安装一个与 CUDA 兼容的 g++ 版本。"
     fi
-    log_success "Selected g++ compiler: $DETECTED_CXXCUDA"
+    log_success "已选择 g++ 编译器: $DETECTED_CXXCUDA"
 
-    # Assume standard CUDA path
+    # 假设 CUDA 安装在标准路径
     DETECTED_CUDA_PATH="/usr/local/cuda"
     if [ ! -d "$DETECTED_CUDA_PATH" ]; then
-        log_warn "Standard CUDA path '$DETECTED_CUDA_PATH' not found. Assuming it's in the system PATH."
-        # If not in standard path, nvcc must be in PATH, so we can leave the Makefile path empty and let it rely on the PATH.
-        DETECTED_CUDA_PATH=""
+        log_warn "标准 CUDA 路径 '$DETECTED_CUDA_PATH' 不存在。将假定 'nvcc' 已经在系统 PATH 中。"
+        DETECTED_CUDA_PATH="" # 如果不在标准路径，留空以依赖系统 PATH
     else
-         log_success "Found CUDA installation at $DETECTED_CUDA_PATH"
+         log_success "找到 CUDA 安装路径: $DETECTED_CUDA_PATH"
     fi
 }
 
-# Function to download the source code with retries.
+# 下载源代码，包含重试逻辑。
 download_source() {
-    log_info "Downloading VanitySearch source code..."
+    log_info "正在下载 VanitySearch 源代码..."
     
     if [ -d "$PROJECT_DIR" ]; then
-        log_warn "Directory '$PROJECT_DIR' already exists. It will be removed for a clean installation."
+        log_warn "目录 '$PROJECT_DIR' 已存在。将删除该目录以进行全新安装。"
         rm -rf "$PROJECT_DIR"
     fi
 
     for ((i=1; i<=MAX_RETRIES; i++)); do
-        git clone "$GITHUB_REPO" && log_success "Source code downloaded successfully." && return 0
-        log_warn "Git clone failed (Attempt $i/$MAX_RETRIES). Retrying in 3 seconds..."
+        if git clone "$GITHUB_REPO"; then
+            log_success "源代码下载成功。"
+            return 0
+        fi
+        log_warn "Git 克隆失败 (尝试次数 $i/$MAX_RETRIES)。将在 3 秒后重试..."
         sleep 3
     done
     
-    log_error "Failed to clone the repository after $MAX_RETRIES attempts."
+    log_error "尝试 $MAX_RETRIES 次后，克隆仓库失败。"
 }
 
-# Function to dynamically configure the Makefile.
+# 应用补丁修复 'uint32_t' 编译错误
+patch_source_code() {
+    log_info "正在应用源代码补丁以修复 'uint32_t' 编译错误..."
+    local file_to_patch="${PROJECT_DIR}/Timer.h"
+
+    if [ -f "$file_to_patch" ]; then
+        # 检查是否已打过补丁，避免重复操作
+        if ! grep -q "#include <cstdint>" "$file_to_patch"; then
+            # 在文件第一行插入 #include <cstdint>
+            sed -i '1i#include <cstdint>\n' "$file_to_patch"
+            log_success "成功为 Timer.h 添加 #include <cstdint> 补丁。"
+        else
+            log_info "补丁已存在于 Timer.h，跳过此步骤。"
+        fi
+    else
+        log_error "需要打补丁的文件 '$file_to_patch' 不存在。"
+    fi
+}
+
+# 根据检测到的环境动态配置 Makefile。
 configure_makefile() {
-    log_info "Configuring Makefile for your system..."
+    log_info "正在根据您的系统环境配置 Makefile..."
     
     cd "$PROJECT_DIR"
     if [ ! -f "Makefile" ]; then
-        log_error "Makefile not found in the project directory."
+        log_error "在项目目录中未找到 Makefile 文件。"
     fi
 
-    # Use sed to replace the default CUDA and CXXCUDA paths with our detected ones.
-    # The `|| true` prevents the script from exiting if a pattern is not found (e.g., if the user already modified it).
-    sed -i "s|^CUDA       = .*|CUDA       = ${DETECTED_CUDA_PATH}|" Makefile || true
-    sed -i "s|^CXXCUDA    = .*|CXXCUDA    = ${DETECTED_CXXCUDA}|" Makefile || true
+    # 使用 sed 命令替换 Makefile 中的默认 CUDA 和 CXXCUDA 路径
+    sed -i "s|^CUDA       = .*|CUDA       = ${DETECTED_CUDA_PATH}|" Makefile
+    sed -i "s|^CXXCUDA    = .*|CXXCUDA    = ${DETECTED_CXXCUDA}|" Makefile
     
-    log_success "Makefile configured automatically."
+    log_success "Makefile 配置已自动完成。"
     cd ..
 }
 
-# Function to compile the source code.
+# 编译源代码。
 compile_source() {
-    log_info "Starting compilation... This may take a few minutes."
+    log_info "开始编译... 这可能需要几分钟时间。"
     
     cd "$PROJECT_DIR"
     
-    # Clean previous builds first
+    # 首先清理旧的编译文件
     make clean > /dev/null 2>&1 || true
     
     if make -j$(nproc) gpu=1 ccap=${DETECTED_CCAP} all; then
-        log_success "Compilation finished successfully!"
+        log_success "编译成功完成！"
     else
-        log_error "Compilation failed. Please review the error messages above. Common issues include:\n  - Incompatible CUDA and g++ versions.\n  - Incorrect NVIDIA driver installation."
+        log_error "编译失败。请检查上方的错误信息。常见问题包括:\n  - CUDA 和 g++ 版本不兼容。\n  - NVIDIA 驱动安装不正确。"
     fi
     
     cd ..
 }
 
-# --- Main Execution Logic ---
+# --- 主执行逻辑 ---
 main() {
-    # Welcome and warning message
-    echo -e "${C_BOLD}--- alek76-2/VanitySearch Automated Installer ---${C_RESET}"
-    log_warn "This script will attempt to compile software from source. It will NOT install system-level packages (like drivers or compilers) with root privileges."
-    log_warn "Please ensure you have installed NVIDIA drivers and the CUDA Toolkit MANUALLY before running this script."
+    # 欢迎和警告信息
+    echo -e "${C_BOLD}--- alek76-2/VanitySearch 自动化安装脚本 (v${SCRIPT_VERSION}) ---${C_RESET}"
+    log_warn "本脚本将尝试从源代码编译软件，但不会使用 root 权限安装任何系统级软件包 (如驱动或编译器)。"
+    log_warn "在运行本脚本前，请确保您已手动安装了 NVIDIA 驱动和 CUDA 工具包。"
     echo "----------------------------------------------------"
     sleep 2
 
-    # Step 1: Check system dependencies
+    # 步骤 1: 检查系统依赖
     check_dependencies
     
-    # Step 2: Check NVIDIA environment
+    # 步骤 2: 检查 NVIDIA 环境
     check_nvidia_cuda
     
-    # Step 3: Download source
+    # 步骤 3: 下载源代码
     download_source
     
-    # Step 4: Configure Makefile
+    # 步骤 4: 应用源代码补丁
+    patch_source_code
+    
+    # 步骤 5: 配置 Makefile
     configure_makefile
     
-    # Step 5: Compile
+    # 步骤 6: 编译
     compile_source
 
-    # Final success message
+    # 最终成功信息
     echo "----------------------------------------------------"
-    log_success "VanitySearch has been successfully installed!"
-    log_info "The executable is located at: ${C_BOLD}$(pwd)/${PROJECT_DIR}/VanitySearch${C_RESET}"
-    log_info "To run it, use a command like:"
+    log_success "VanitySearch 已成功安装！"
+    log_info "可执行文件位于: ${C_BOLD}$(pwd)/${PROJECT_DIR}/VanitySearch${C_RESET}"
+    log_info "您可以像这样运行它:"
     echo -e "  cd ${PROJECT_DIR}"
     echo -e "  ./VanitySearch -gpu 1MyPrefix"
     echo ""
-    log_warn "SECURITY REMINDER: Always handle your generated private keys with extreme care. Store them offline and securely."
+    log_warn "安全提醒: 请务必小心处理您生成的私钥。将其离线、安全地备份。"
     echo "----------------------------------------------------"
 }
 
-# Run the main function
+# 运行主函数
 main
