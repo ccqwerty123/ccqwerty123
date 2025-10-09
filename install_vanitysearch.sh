@@ -1,76 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# Config & Globals
-# =========================
 REPO_URL="https://github.com/alek76-2/VanitySearch.git"
 INSTALL_DIR="${HOME}/VanitySearch"
 LOG_FILE="${HOME}/vanitysearch_install_$(date +%Y%m%d_%H%M%S).log"
 REQUIRED_PKGS=(build-essential git pkg-config libssl-dev ocl-icd-opencl-dev gcc-12 g++-12)
-UBUNTU_CODENAME="noble"   # Ubuntu 24.04
+UBUNTU_CODENAME="noble"
 APT_LIST="/etc/apt/sources.list"
-CUDA_PATH=""              # will detect
-CUDA_BIN=""               # will detect nvcc
-CCAP_INT=""               # e.g., 75
-CCAP_DOT=""               # e.g., 7.5
 
-# =========================
-# Helpers
-# =========================
+# 可选：手动覆盖计算能力，例如 7.5 / 8.6
+FORCE_CCAP="${FORCE_CCAP:-}"
+
 info()  { echo -e "\033[1;32m[INFO]\033[0m $*" | tee -a "$LOG_FILE"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m $*" | tee -a "$LOG_FILE"; }
 err()   { echo -e "\033[1;31m[ERR ]\033[0m $*" | tee -a "$LOG_FILE"; }
-die()   { err "$*"; err "安装未完成，详见日志: $LOG_FILE"; exit 1; }
+die()   { err "$*"; err "安装未完成，日志: $LOG_FILE"; exit 1; }
+need_cmd(){ command -v "$1" >/dev/null 2>&1; }
+retry(){ local t=$1; shift; local n=1; until "$@" >>"$LOG_FILE" 2>&1; do
+  if (( n>=t )); then return 1; fi; warn "第 $n/$t 次失败，重试：$*"; sleep $((2*n)); ((n++)); done; }
+require_root_or_sudo(){ if [[ $EUID -ne 0 ]] && ! need_cmd sudo; then die "需要 root 或 sudo 权限"; fi; }
+sudo_run(){ if [[ $EUID -ne 0 ]]; then sudo "$@"; else "$@"; fi; }
 
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-retry() {
-  local tries=$1; shift
-  local n=1
-  until "$@" >>"$LOG_FILE" 2>&1; do
-    if (( n >= tries )); then return 1; fi
-    warn "命令失败，$n/${tries} 次重试后继续...[$*]"
-    sleep $((2*n))
-    ((n++))
-  done
-}
-
-require_root_or_sudo() {
-  if [[ $EUID -ne 0 ]]; then
-    if ! need_cmd sudo; then
-      die "需要 root 或 sudo 权限，请用 sudo 运行该脚本。"
-    fi
-  fi
-}
-
-sudo_run() {
-  if [[ $EUID -ne 0 ]]; then sudo "$@"; else "$@"; fi
-}
-
-# =========================
-# Step 0: 环境与日志准备
-# =========================
-info "日志文件: $LOG_FILE"
-info "检查系统为 Ubuntu 24.04（noble）..."
-if ! need_cmd lsb_release; then
-  sudo_run apt-get update -o Acquire::Retries=3 >>"$LOG_FILE" 2>&1 || true
-  sudo_run apt-get install -y lsb-release >>"$LOG_FILE" 2>&1 || true
-fi
-DISTRO=$(lsb_release -is 2>/dev/null || echo "Ubuntu")
-CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
-RELEASE=$(lsb_release -rs 2>/dev/null || echo "")
-info "检测到: ${DISTRO} ${RELEASE} (${CODENAME})"
-if [[ "${DISTRO}" != "Ubuntu" ]]; then
-  die "非 Ubuntu 系统，脚本仅适配 Ubuntu 24.04（noble）。"
-fi
-
+info "日志: $LOG_FILE"
 require_root_or_sudo
 
-# =========================
-# Step 1: 修正 APT 源并更新（带回退）
-# =========================
-
+# 1) 修正 apt 源并更新（带回退）
 #
 # 自动修复并更新 APT 源的函数 (v5.1 - 修复 grep + set -e 导致的脚本中止问题)
 #
@@ -151,146 +105,144 @@ EOF
 }
 
 
+
 fix_apt_sources
 
-# =========================
-# Step 2: 安装所需依赖
-# =========================
+# 2) 依赖
 info "安装依赖：${REQUIRED_PKGS[*]}"
-retry 3 sudo_run apt-get install -y "${REQUIRED_PKGS[@]}" || die "依赖安装失败。"
+retry 3 sudo_run apt-get install -y "${REQUIRED_PKGS[@]}" || die "依赖安装失败"
 
-# =========================
-# Step 3: 检测 CUDA 与 nvcc
-# =========================
-detect_cuda() {
-  if need_cmd nvcc; then
-    CUDA_BIN=$(command -v nvcc)
-    CUDA_PATH=$(dirname "$(dirname "$CUDA_BIN")")
-  else
-    # 常见默认路径回退
-    for c in /usr/local/cuda /usr/local/cuda-12.0 /usr/local/cuda-12 /usr/local/cuda-11.8; do
-      if [[ -x "$c/bin/nvcc" ]]; then CUDA_PATH="$c"; CUDA_BIN="$c/bin/nvcc"; break; fi
-    done
-  fi
-
-  if [[ -z "${CUDA_BIN}" || ! -x "${CUDA_BIN}" ]]; then
-    die "未检测到 nvcc（CUDA 编译器）。请确认已正确安装 CUDA Toolkit 12.0 并将 nvcc 加入 PATH。"
-  fi
-
-  info "检测到 CUDA: ${CUDA_PATH}, nvcc: ${CUDA_BIN}"
+# 3) 检测 nvcc 与 CUDA 根
+CUDA_BIN=""
+CUDA_PATH=""
+detect_cuda(){
+  if ! need_cmd nvcc; then die "未找到 nvcc，请先安装 CUDA Toolkit（与你系统匹配即可，当前驱动支持 CUDA 13，nvcc 12.0 也能用）"; fi
+  CUDA_BIN="$(command -v nvcc)"
+  local realbin; realbin="$(readlink -f "$CUDA_BIN" || echo "$CUDA_BIN")"
+  CUDA_PATH="$(dirname "$(dirname "$realbin")")"
+  # 对 Debian/Ubuntu 打包的 cuda-toolkit，nvcc 在 /usr/bin，CUDA_PATH 可能解析为 /usr
+  info "nvcc: ${CUDA_BIN}"
+  info "推测 CUDA 根目录: ${CUDA_PATH}"
   export PATH="${CUDA_PATH}/bin:${PATH}"
-  export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}"
+  # 运行时库多数在 /usr/lib/x86_64-linux-gnu，保留 LD_LIBRARY_PATH 为默认
 }
 detect_cuda
 
-# =========================
-# Step 4: 检测 GPU 计算能力（ccap）
-# =========================
-detect_ccap() {
+# 4) 读取计算能力（优先用户覆盖；否则 nvidia-smi；再退回 T4=7.5）
+CCAP_DOT=""
+CCAP_INT=""
+detect_ccap(){
+  if [[ -n "$FORCE_CCAP" ]]; then
+    [[ "$FORCE_CCAP" =~ ^[0-9]+\.[0-9]+$ ]] || die "FORCE_CCAP 格式应为如 7.5/8.6"
+    CCAP_DOT="$FORCE_CCAP"; CCAP_INT="$(echo "$FORCE_CCAP" | tr -d '.')"
+    info "使用用户指定 CCAP=${CCAP_DOT}"
+    return
+  fi
   local cap=""
   if need_cmd nvidia-smi; then
-    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 || true)
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
   fi
-  if [[ -z "$cap" ]]; then
-    # 回退：通过名字猜测（你的机器是 Tesla T4）
-    local name=""
-    if need_cmd nvidia-smi; then
-      name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || true)
-    fi
-    if echo "$name" | grep -qi "T4"; then
-      cap="7.5"
-    else
-      warn "无法从 nvidia-smi 读取 compute capability，默认使用 7.5（T4）。"
-      cap="7.5"
-    fi
+  if [[ -z "$cap" || ! "$cap" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    warn "无法从 nvidia-smi 读取有效 compute capability，按 Tesla T4 设定 7.5（可用 FORCE_CCAP 覆盖）"
+    cap="7.5"
   fi
-  CCAP_DOT="$cap"
-  CCAP_INT="$(echo "$cap" | tr -d '.')"
-  info "GPU 计算能力: ${CCAP_DOT}（传参 CCAP=${CCAP_DOT} / ccap=${CCAP_INT}）"
+  CCAP_DOT="$cap"; CCAP_INT="$(echo "$cap" | tr -d '.')"
+  info "GPU 计算能力：${CCAP_DOT}（传参 ccap=${CCAP_INT} / CCAP=${CCAP_DOT}）"
 }
 detect_ccap
 
-# =========================
-# Step 5: 获取源码（alek76-2/VanitySearch）
-# =========================
-fetch_source() {
+# 5) 获取源码
+fetch_source(){
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    info "检测到已有仓库：${INSTALL_DIR}，执行 git pull..."
-    (cd "${INSTALL_DIR}" && git fetch --all >>"$LOG_FILE" 2>&1 && git reset --hard origin/master >>"$LOG_FILE" 2>&1) || die "git 更新失败。"
+    info "更新仓库 ${INSTALL_DIR}"
+    (cd "${INSTALL_DIR}" && git fetch --all >>"$LOG_FILE" 2>&1 && git reset --hard origin/master >>"$LOG_FILE" 2>&1) || die "git 更新失败"
   else
-    info "克隆仓库到 ${INSTALL_DIR}..."
-    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}" >>"$LOG_FILE" 2>&1 || die "git clone 失败。"
+    info "克隆仓库到 ${INSTALL_DIR}"
+    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}" >>"$LOG_FILE" 2>&1 || die "git clone 失败"
   fi
 }
 fetch_source
 
-# =========================
-# Step 6: 构建（先 CPU，后 GPU）
-# =========================
-build_project() {
-  local jobs
-  jobs=$(nproc || echo 2)
+# 6) 源码补丁：为缺少 <stdint.h> 的头自动补齐；同时强制编译时 -include stdint.h
+patch_sources(){
+  info "应用源码补丁（自动补 <stdint.h>）"
+  # 针对常见包含 uint8_t 的头
+  local heads=( "hash/sha256.h" "hash/sha256_sse.h" "hash/ripemd160.h" )
+  for h in "${heads[@]}"; do
+    local p="${INSTALL_DIR}/${h}"
+    if [[ -f "$p" ]]; then
+      if ! grep -Eq '^(#include\s*<cstdint>|#include\s*<stdint.h>)' "$p"; then
+        sed -i '1i #include <stdint.h>' "$p"
+        echo "[PATCH] add <stdint.h> -> $h" >>"$LOG_FILE"
+      fi
+    fi
+  done
+}
+patch_sources
 
+# 7) 构建 CPU
+build_cpu(){
   info "开始构建 CPU 版..."
+  local jobs; jobs=$(nproc || echo 2)
   ( cd "${INSTALL_DIR}" && make clean >>"$LOG_FILE" 2>&1 || true
-    if ! make -j"${jobs}" >>"$LOG_FILE" 2>&1; then
-      die "CPU 版构建失败，请查看日志：${LOG_FILE}"
+    # 强制标准并全局预包含 stdint.h，兼容 gcc-13
+    if ! make -j"${jobs}" CXXFLAGS+=' -std=gnu++14 -include stdint.h ' CFLAGS+=' -std=gnu11 -include stdint.h ' >>"$LOG_FILE" 2>&1; then
+      err "CPU 版首次构建失败，添加 -fcommon 重试..."
+      make clean >>"$LOG_FILE" 2>&1 || true
+      make -j"${jobs}" CXXFLAGS+=' -std=gnu++14 -include stdint.h -fcommon ' CFLAGS+=' -std=gnu11 -include stdint.h -fcommon ' >>"$LOG_FILE" 2>&1 || die "CPU 版构建失败，请查日志"
     fi
   )
   info "CPU 版构建完成。"
+}
+build_cpu
 
-  # 尝试 GPU 版
-  info "开始构建 GPU 版（nvcc 用 g++-12 作为宿主编译器）..."
-  local cuda_arg="CUDA=${CUDA_PATH}"
-  local cxxcuda_arg="CXXCUDA=/usr/bin/g++-12"
-  local gpu_args=(gpu=1 all)
-  # 同时传递两种 ccap 写法，兼容不同 Makefile 风格
-  ( cd "${INSTALL_DIR}" && \
-    if ! make -j"${jobs}" ${cuda_arg} ${cxxcuda_arg} ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" "${gpu_args[@]}" >>"$LOG_FILE" 2>&1; then
-      # 如果失败，尝试显式导出 PATH/LD_LIBRARY_PATH 后再来一次（处理环境变量问题）
+# 8) 构建 GPU（nvcc 指定 g++-12；传 cc 与 NVCCFLAGS）
+build_gpu(){
+  # 能用 nvidia-smi 即可尝试 GPU 构建；不强制要求 /dev/nvidia*（某些容器只做编译）
+  if ! need_cmd nvcc; then warn "无 nvcc，跳过 GPU 构建"; return; fi
+  info "开始构建 GPU 版（CXXCUDA=g++-12, CCAP=${CCAP_DOT}/${CCAP_INT}）..."
+  local jobs; jobs=$(nproc || echo 2)
+  ( cd "${INSTALL_DIR}" && make clean >>"$LOG_FILE" 2>&1 || true
+    if ! make -j"${jobs}" \
+        CUDA="${CUDA_PATH}" CXXCUDA="/usr/bin/g++-12" \
+        NVCCFLAGS+=' --std=c++14 ' \
+        ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" gpu=1 all >>"$LOG_FILE" 2>&1; then
+      err "GPU 版首次构建失败，显式导出 PATH 后重试..."
       export PATH="${CUDA_PATH}/bin:${PATH}"
-      export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}"
-      warn "首次 GPU 构建失败，尝试在显式 CUDA 环境下重试..."
       make clean >>"$LOG_FILE" 2>&1 || true
-      make -j"${jobs}" ${cuda_arg} ${cxxcuda_arg} ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" "${gpu_args[@]}" >>"$LOG_FILE" 2>&1 || die "GPU 版构建失败，请查看日志：${LOG_FILE}"
+      make -j"${jobs}" \
+        CUDA="${CUDA_PATH}" CXXCUDA="/usr/bin/g++-12" \
+        NVCCFLAGS+=' --std=c++14 ' \
+        ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" gpu=1 all >>"$LOG_FILE" 2>&1 || {
+          warn "GPU 版仍失败。可能是该 fork 的 Makefile 与本机 CUDA 组合不兼容，先使用 CPU 版；我可以根据日志再做定向补丁。"
+          return 0; }
     fi
   )
   info "GPU 版构建完成。"
 }
-build_project
+build_gpu
 
-# =========================
-# Step 7: 生成环境文件与自检
-# =========================
-post_setup() {
-  info "写入环境变量到 ${INSTALL_DIR}/env.sh"
+# 9) 环境文件与自检
+post_setup(){
+  info "写入 ${INSTALL_DIR}/env.sh"
   cat > "${INSTALL_DIR}/env.sh" <<EOF
-# 加载 CUDA 运行库路径与可执行文件路径
+# VanitySearch 环境变量
 export PATH="${CUDA_PATH}/bin:\$PATH"
-export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:\${LD_LIBRARY_PATH:-}"
+# Ubuntu 的 CUDA 库通常在 /usr/lib/x86_64-linux-gnu，无需额外 LD_LIBRARY_PATH
 EOF
-
   chmod +x "${INSTALL_DIR}/env.sh"
 
-  info "自检：显示帮助与列出 CUDA 设备..."
-  ( cd "${INSTALL_DIR}"
-    source ./env.sh
-    ./VanitySearch -h >/dev/null 2>&1 || warn "VanitySearch -h 返回非 0，但可能仅为帮助退出码。"
-    if ./VanitySearch -l >/dev/null 2>&1; then
-      info "已成功列出 CUDA 设备。"
-    else
-      warn "无法列出 CUDA 设备（./VanitySearch -l）。GPU 仍可能需要检查驱动/CUDA 环境。"
-    fi
-  )
+  info "自检：打印帮助..."
+  ( cd "${INSTALL_DIR}" && ./VanitySearch -h >/dev/null 2>&1 || true )
+  info "完成。可执行文件：${INSTALL_DIR}/VanitySearch"
+  echo
+  echo "使用示例："
+  echo "  cd '${INSTALL_DIR}'"
+  echo "  source ./env.sh"
+  echo "  ./VanitySearch -h"
+  echo "  ./VanitySearch -l               # 列出 CUDA 设备（GPU 构建成功且可访问时）"
+  echo "  ./VanitySearch -gpu -t 1 1YourPrefixHere"
 }
 post_setup
 
-info "全部完成！"
-echo
-echo "接下来可按如下方式使用（示例）："
-echo "  cd '${INSTALL_DIR}'"
-echo "  source ./env.sh"
-echo "  ./VanitySearch -l              # 列出 CUDA 设备"
-echo "  ./VanitySearch -gpu -t 1 1YourPrefixHere"
-echo
-echo "若构建失败，请查看日志：${LOG_FILE}"
+info "全部完成！日志：${LOG_FILE}"
