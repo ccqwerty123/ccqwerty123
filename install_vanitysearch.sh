@@ -2,7 +2,7 @@
 #
 # alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# 版本: 2.0.0-zh
+# 版本: 2.1.0-zh
 #
 # 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
@@ -11,7 +11,8 @@
 # - 自动检查依赖项 (git, build-essential, libssl-dev)。
 # - 智能检测 NVIDIA 驱动和 CUDA 工具包。
 # - 自动检测 GPU 的计算能力 (Compute Capability, ccap)。
-# - 自动修复 'uint32_t' 未定义的编译错误。
+# - [v2.0.0] 自动修复 'Timer.h' 中 'uint32_t' 未定义的编译错误。
+# - [v2.1.0] 自动修复 'hash/sha512.h' 中 'uint8_t/uint64_t' 未定义的编译错误。
 # - 自动配置 Makefile 文件。
 # - 为网络操作提供重试逻辑。
 # - 提供彩色的、详细的中文输出，提升用户体验。
@@ -19,7 +20,7 @@
 #
 
 # --- 配置信息 ---
-SCRIPT_VERSION="2.0.0-zh"
+SCRIPT_VERSION="2.1.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
 REQUIRED_CMDS=("git" "g++" "make")
@@ -27,9 +28,9 @@ REQUIRED_HEADERS=("/usr/include/openssl/ssl.h")
 MAX_RETRIES=3
 
 # --- Shell 安全设置与颜色定义 ---
-set -o errexit  # 如果任何命令以非零状态退出，则立即退出脚本。
-set -o nounset  # 将未设置的变量视为错误。
-set -o pipefail # 管道命令的返回值将是最后一个以非零状态退出的命令的返回值。
+set -o errexit
+set -o nounset
+set -o pipefail
 
 # 颜色定义
 C_RESET='\033[0m'
@@ -59,26 +60,22 @@ log_error() {
 # 检查系统所需的基础命令和库文件。
 check_dependencies() {
     log_info "正在检查系统基础依赖项..."
-    
     for cmd in "${REQUIRED_CMDS[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             log_error "命令 '$cmd' 未找到。请先安装它。在 Debian/Ubuntu 系统上, 请尝试: sudo apt install build-essential git"
         fi
     done
-
     for header in "${REQUIRED_HEADERS[@]}"; do
         if [ ! -f "$header" ]; then
             log_error "头文件 '$header' 未找到。请安装 OpenSSL 开发库。在 Debian/Ubuntu 系统上, 请尝试: sudo apt install libssl-dev"
         fi
     done
-    
     log_success "所有基础依赖项均已安装。"
 }
 
 # 检查 NVIDIA 驱动和 CUDA 环境, 并检测相关属性。
 check_nvidia_cuda() {
     log_info "正在检查 NVIDIA GPU 环境..."
-
     if ! command -v nvidia-smi &>/dev/null; then
         log_error "未找到 NVIDIA 驱动。'nvidia-smi' 命令执行失败。请为您的 GPU 安装合适的 NVIDIA 官方驱动并重启系统。"
     fi
@@ -91,18 +88,15 @@ check_nvidia_cuda() {
     cuda_version=$(nvcc --version | grep "release" | sed 's/.*release \([^,]*\).*/\1/')
     log_success "已检测到 NVIDIA CUDA 工具包 (版本: $cuda_version)。"
 
-    # 自动检测 GPU 计算能力 (ccap)
     log_info "正在检测 GPU 计算能力 (ccap)..."
     local compute_cap
     compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
     if [ -z "$compute_cap" ]; then
         log_error "无法确定 GPU 计算能力。请检查您的 'nvidia-smi' 是否工作正常。"
     fi
-    # 将 "8.6" 格式转换为 Makefile 所需的 "86" 格式
     DETECTED_CCAP=$(echo "$compute_cap" | tr -d '.')
     log_success "检测到 GPU 计算能力: $compute_cap (对应的 ccap值为 ${DETECTED_CCAP})"
     
-    # 尝试寻找一个合适的 g++ 编译器路径
     if command -v g++-7 &>/dev/null; then
         DETECTED_CXXCUDA="/usr/bin/g++-7"
     elif command -v g++-8 &>/dev/null; then
@@ -113,11 +107,10 @@ check_nvidia_cuda() {
     fi
     log_success "已选择 g++ 编译器: $DETECTED_CXXCUDA"
 
-    # 假设 CUDA 安装在标准路径
     DETECTED_CUDA_PATH="/usr/local/cuda"
     if [ ! -d "$DETECTED_CUDA_PATH" ]; then
         log_warn "标准 CUDA 路径 '$DETECTED_CUDA_PATH' 不存在。将假定 'nvcc' 已经在系统 PATH 中。"
-        DETECTED_CUDA_PATH="" # 如果不在标准路径，留空以依赖系统 PATH
+        DETECTED_CUDA_PATH=""
     else
          log_success "找到 CUDA 安装路径: $DETECTED_CUDA_PATH"
     fi
@@ -126,7 +119,6 @@ check_nvidia_cuda() {
 # 下载源代码，包含重试逻辑。
 download_source() {
     log_info "正在下载 VanitySearch 源代码..."
-    
     if [ -d "$PROJECT_DIR" ]; then
         log_warn "目录 '$PROJECT_DIR' 已存在。将删除该目录以进行全新安装。"
         rm -rf "$PROJECT_DIR"
@@ -144,38 +136,46 @@ download_source() {
     log_error "尝试 $MAX_RETRIES 次后，克隆仓库失败。"
 }
 
-# 应用补丁修复 'uint32_t' 编译错误
+# 应用补丁修复 C++ 兼容性导致的编译错误
 patch_source_code() {
-    log_info "正在应用源代码补丁以修复 'uint32_t' 编译错误..."
-    local file_to_patch="${PROJECT_DIR}/Timer.h"
-
-    if [ -f "$file_to_patch" ]; then
-        # 检查是否已打过补丁，避免重复操作
-        if ! grep -q "#include <cstdint>" "$file_to_patch"; then
-            # 在文件第一行插入 #include <cstdint>
-            sed -i '1i#include <cstdint>\n' "$file_to_patch"
+    log_info "正在应用源代码补丁以修复编译错误..."
+    
+    # 补丁 1: 修复 Timer.h
+    local file_to_patch_1="${PROJECT_DIR}/Timer.h"
+    if [ -f "$file_to_patch_1" ]; then
+        if ! grep -q "#include <cstdint>" "$file_to_patch_1"; then
+            sed -i '1i#include <cstdint>\n' "$file_to_patch_1"
             log_success "成功为 Timer.h 添加 #include <cstdint> 补丁。"
         else
-            log_info "补丁已存在于 Timer.h，跳过此步骤。"
+            log_info "补丁已存在于 Timer.h，跳过。"
         fi
     else
-        log_error "需要打补丁的文件 '$file_to_patch' 不存在。"
+        log_error "需要打补丁的文件 '$file_to_patch_1' 不存在。"
+    fi
+
+    # 补丁 2: 修复 hash/sha512.h
+    local file_to_patch_2="${PROJECT_DIR}/hash/sha512.h"
+    if [ -f "$file_to_patch_2" ]; then
+        if ! grep -q "#include <cstdint>" "$file_to_patch_2"; then
+            sed -i '1i#include <cstdint>\n' "$file_to_patch_2"
+            log_success "成功为 hash/sha512.h 添加 #include <cstdint> 补丁。"
+        else
+            log_info "补丁已存在于 hash/sha512.h，跳过。"
+        fi
+    else
+        log_error "需要打补丁的文件 '$file_to_patch_2' 不存在。"
     fi
 }
 
 # 根据检测到的环境动态配置 Makefile。
 configure_makefile() {
     log_info "正在根据您的系统环境配置 Makefile..."
-    
     cd "$PROJECT_DIR"
     if [ ! -f "Makefile" ]; then
         log_error "在项目目录中未找到 Makefile 文件。"
     fi
-
-    # 使用 sed 命令替换 Makefile 中的默认 CUDA 和 CXXCUDA 路径
     sed -i "s|^CUDA       = .*|CUDA       = ${DETECTED_CUDA_PATH}|" Makefile
     sed -i "s|^CXXCUDA    = .*|CXXCUDA    = ${DETECTED_CXXCUDA}|" Makefile
-    
     log_success "Makefile 配置已自动完成。"
     cd ..
 }
@@ -183,49 +183,31 @@ configure_makefile() {
 # 编译源代码。
 compile_source() {
     log_info "开始编译... 这可能需要几分钟时间。"
-    
     cd "$PROJECT_DIR"
-    
-    # 首先清理旧的编译文件
     make clean > /dev/null 2>&1 || true
-    
     if make -j$(nproc) gpu=1 ccap=${DETECTED_CCAP} all; then
         log_success "编译成功完成！"
     else
         log_error "编译失败。请检查上方的错误信息。常见问题包括:\n  - CUDA 和 g++ 版本不兼容。\n  - NVIDIA 驱动安装不正确。"
     fi
-    
     cd ..
 }
 
 # --- 主执行逻辑 ---
 main() {
-    # 欢迎和警告信息
     echo -e "${C_BOLD}--- alek76-2/VanitySearch 自动化安装脚本 (v${SCRIPT_VERSION}) ---${C_RESET}"
     log_warn "本脚本将尝试从源代码编译软件，但不会使用 root 权限安装任何系统级软件包 (如驱动或编译器)。"
     log_warn "在运行本脚本前，请确保您已手动安装了 NVIDIA 驱动和 CUDA 工具包。"
     echo "----------------------------------------------------"
     sleep 2
 
-    # 步骤 1: 检查系统依赖
     check_dependencies
-    
-    # 步骤 2: 检查 NVIDIA 环境
     check_nvidia_cuda
-    
-    # 步骤 3: 下载源代码
     download_source
-    
-    # 步骤 4: 应用源代码补丁
     patch_source_code
-    
-    # 步骤 5: 配置 Makefile
     configure_makefile
-    
-    # 步骤 6: 编译
     compile_source
 
-    # 最终成功信息
     echo "----------------------------------------------------"
     log_success "VanitySearch 已成功安装！"
     log_info "可执行文件位于: ${C_BOLD}$(pwd)/${PROJECT_DIR}/VanitySearch${C_RESET}"
