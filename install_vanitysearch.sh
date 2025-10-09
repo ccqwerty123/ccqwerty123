@@ -2,33 +2,30 @@
 #
 # alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# 版本: 4.1.0-zh
+# 版本: 4.2.0-zh
 #
 # 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
 #
 # ==============================================================================
-# v4.1.0 更新日志:
-# - 修复: [核心修复] 解决了在现代系统上编译旧版 OpenSSL (1.0.1a) 时，
-#   因默认 gcc 版本过新而导致编译 silently fail (静默失败) 并使脚本中止的问题。
-# - 变更: 在编译 OpenSSL 的步骤中，通过 `export CC=gcc-9` 明确指定使用
-#   兼容的旧版本 C 编译器。
-# - 变更: 安装编译器步骤现在会确保 `gcc-9` 和 `g++-9` 都被安装。
+# v4.2.0 更新日志:
+# - 核心修复: 根据用户提供的详细日志，定位到 OpenSSL 编译过程中的链接阶段
+#   为 `fips_premain_dso` 时发生静默失败。
+# - 解决方案: 在 OpenSSL 的 `./config` 步骤中添加 `no-fips` 参数，
+#   彻底跳过这个不必要且导致编译中止的 FIPS 模块。
 # ==============================================================================
 #
 # 功能特性:
-# - [v4.1+] 强制使用 gcc-9 编译旧版 OpenSSL，解决兼容性问题。
+# - [v4.2+] 禁用 OpenSSL FIPS 模块编译，解决现代系统上的链接器兼容性死锁。
+# - [v4.1+] 强制使用 gcc-9 编译旧版 OpenSSL，解决编译器兼容性问题。
 # - [v4.0+] 自动编译并链接所需的旧版本 OpenSSL (1.0.1a)。
 # - [v4.0+] 智能检查，避免重复安装。
 # - [v4.0+] 通过运行程序本身来验证安装成功。
 # - [v3.3+] 自动切换为国内高速 APT 镜像源。
-# - [v3.1+] 自动检查并安装缺失的旧版本编译器 (g++-9, gcc-9)。
-# - 智能检测 NVIDIA 驱动、CUDA 工具包及 GPU 计算能力。
-# - 自动修复源代码中的 C++ 兼容性错误。
 #
 
 # --- 配置信息 ---
-SCRIPT_VERSION="4.1.0-zh"
+SCRIPT_VERSION="4.2.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
 COMPATIBLE_COMPILERS=("g++-9" "g++-8" "g++-7")
@@ -113,8 +110,9 @@ install_openssl_from_source() {
     log_info "指定使用 ${COMPATIBLE_C_COMPILER} 编译器以确保兼容性..."
     export CC=$(command -v ${COMPATIBLE_C_COMPILER})
     
-    log_info "正在配置 OpenSSL..."
-    ./config shared --prefix="$OPENSSL_INSTALL_PATH"
+    log_info "正在配置 OpenSSL (禁用 FIPS 模块以避免链接错误)..."
+    # [核心修复] 添加 no-fips 选项来跳过导致编译中止的 FIPS 模块链接步骤
+    ./config shared no-fips --prefix="$OPENSSL_INSTALL_PATH"
     
     log_info "正在编译 OpenSSL..."
     make -j$(nproc)
@@ -147,10 +145,10 @@ find_or_install_compiler() {
 
     if [ "$needs_install" = true ]; then
         log_info "脚本将自动安装缺失的编译器..."
-        if ! sudo apt-get install -y "$cpp_compiler_to_install" "$COMPATIBLE_C_COMPILER" build-essential; then
-            log_error "自动安装编译器失败。请检查 APT 日志。"
+        if ! sudo apt-get install -y "$cpp_compiler_to_install" "$COMPATIBLE_C_COMPILER" build-essential git; then
+            log_error "自动安装编译器或git失败。请检查 APT 日志。"
         fi
-        log_success "成功安装所需的编译器。"
+        log_success "成功安装所需的编译器和git。"
     else
         log_success "已找到所有必需的兼容编译器。"
     fi
@@ -256,13 +254,14 @@ validate_installation() {
     
     log_info "执行 './VanitySearch -h' 以确认程序可运行..."
     echo "------------------- VanitySearch 帮助信息 -------------------"
-    ./VanitySearch -h
-    echo "----------------------------------------------------------"
-    
-    if [ $? -eq 0 ]; then
+    # 使用管道将可能的错误输出重定向，只关心能否正常执行并获得帮助信息
+    if ./VanitySearch -h | head -n 15; then
+        echo "..."
+        echo "----------------------------------------------------------"
         log_success "验证成功！程序可以正常执行。"
     else
-        log_error "验证失败！程序执行时返回了错误码。"
+        echo "----------------------------------------------------------"
+        log_error "验证失败！程序执行时返回了错误码或无输出。"
     fi
 }
 
@@ -275,7 +274,7 @@ main() {
     if [ -f "${start_dir}/${PROJECT_DIR}/VanitySearch" ] && "${start_dir}/${PROJECT_DIR}/VanitySearch" -h > /dev/null 2>&1; then
         log_success "VanitySearch 似乎已经成功安装并且可以运行。"
         log_info "可执行文件位于: ${C_BOLD}${start_dir}/${PROJECT_DIR}/VanitySearch${C_RESET}"
-        log_info "如需重新安装，请先删除 '${PROJECT_DIR}' 目录后再次运行此脚本。"
+        log_info "如需重新安装，请先手动执行 'rm -rf ${PROJECT_DIR}' 后再次运行此脚本。"
         exit 0
     fi
     
