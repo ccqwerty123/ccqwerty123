@@ -71,72 +71,63 @@ require_root_or_sudo
 # Step 1: 修正 APT 源并更新（带回退）
 # =========================
 #
-# 自动修复并更新 APT 源的函数 (v3.1 - 解决锁问题和管道执行冲突)
+#
+# 自动修复并更新 APT 源的函数 (v4.0 - 无依赖，釜底抽薪版)
 #
 fix_apt_sources() {
-  local version="3.1"
-  info "运行 fix_apt_sources 函数 (版本: ${version})..."
+  local version="4.0"
+  echo "[INFO] 运行 fix_apt_sources 函数 (版本: ${version})..."
 
-  # --- 1. 权限检查 (必须在外部以 root 执行) ---
+  # --- 1. 权限检查 ---
   if [[ $EUID -ne 0 ]]; then
-    error "错误：此安装脚本必须以 root 权限运行！"
-    error "请使用 'sudo ./脚本名' 或 'curl ... | sudo bash' 方式执行。"
-    return 1 # 退出函数
+    echo "[ERR ] 错误：此脚本必须以 root 权限运行！" >&2
+    exit 1
   fi
 
-  # 内部辅助函数：强制解锁 APT 系统
+  # 内部辅助函数：强制解锁 APT 系统 (使用 ps 命令，无外部依赖)
   force_unlock_apt() {
-    info "正在检查 APT 系统锁..."
+    echo "[INFO] 正在检查并强制解锁 APT 系统..."
 
-    # 检查 fuser 命令是否存在
-    if ! command -v fuser &> /dev/null; then
-        warn "fuser 命令未找到！尝试安装 psmisc 包..."
-        # 注意：这里调用 apt-get install 可能会再次失败，但我们必须尝试
-        apt-get update -o Acquire::Retries=3 && apt-get install -y psmisc
-        if [ $? -ne 0 ]; then
-             error "FATAL: 无法安装 fuser 依赖包！请手动安装 psmisc 后重试。"
-             return 1
-        fi
-        info "psmisc 包安装成功，继续解锁流程。"
-    fi
+    # 使用 ps 和 grep 查找所有与 apt 或 dpkg 相关的进程
+    # 这是最可靠、无依赖的方法
+    local pids
+    pids=$(ps aux | grep -E 'apt|dpkg' | grep -v grep | awk '{print $2}')
 
-    local lock_pid
-    # 使用 fuser 查找占用锁文件的进程 PID (无需 sudo，因为脚本已经是 root)
-    lock_pid=$(fuser /var/lib/dpkg/lock 2>/dev/null) || lock_pid=$(fuser /var/lib/apt/lists/lock 2>/dev/null)
-
-    if [ -n "$lock_pid" ]; then
-      warn "检测到 APT 锁被进程 ${lock_pid} 占用！正在尝试自动修复..."
-      info "正在终止进程: ${lock_pid}..."
-      kill -9 "${lock_pid}" || { error "FATAL: 无法终止进程 ${lock_pid}，请手动处理！"; return 1; }
+    if [ -n "$pids" ]; then
+      echo "[WARN] 检测到 APT/DPKG 锁被以下进程占用: ${pids}"
+      echo "[INFO] 正在强制终止这些进程..."
+      # 使用 xargs 将换行分隔的 pid 列表传递给 kill
+      echo "${pids}" | xargs kill -9 || { echo "[ERR ] 无法终止旧进程，请手动处理！" >&2; return 1; }
       sleep 1
-
-      info "正在移除残留的锁文件..."
-      rm -f /var/lib/apt/lists/lock
-      rm -f /var/lib/dpkg/lock
-      rm -f /var/lib/dpkg/lock-frontend
-      
-      info "正在重新配置 dpkg..."
-      dpkg --configure -a
-      
-      info "APT 系统解锁成功。"
-    else
-      info "APT 系统状态正常，未发现锁占用。"
+      echo "[INFO] 旧进程已终止。"
     fi
+    
+    # 无论进程是否存在，都强制清理一遍锁文件，确保万无一失
+    echo "[INFO] 正在清理所有已知的锁文件..."
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/lib/dpkg/lock-frontend
+      
+    echo "[INFO] 正在尝试重新配置 dpkg（以防万一）..."
+    dpkg --configure -a
+      
+    echo "[INFO] APT 系统解锁/清理操作完成。"
   }
 
   # --- 主逻辑开始 ---
 
   # 2. 调用解锁函数
   if ! force_unlock_apt; then
-      die "APT 系统解锁失败，安装中止。"
+      echo "[ERR ] APT 系统解锁失败，安装中止。" >&2
+      exit 1
   fi
 
   # 3. 备份现有 APT 源
-  info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
+  echo "[INFO] 备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
   cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
 
   # 4. 写入国内镜像源
-  info "写入国内镜像源（清华大学 TUNA 源）..."
+  echo "[INFO] 写入国内镜像源（清华大学 TUNA 源）..."
   bash -c "cat > '${APT_LIST}'" <<EOF
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
@@ -145,13 +136,29 @@ deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security mai
 EOF
 
   # 5. 更新软件包列表
-  info "apt-get update（3 次重试）..."
-  # -o Acquire::Check-Valid-Until=false: 避免因容器时间不准导致源验证失败
-  retry 3 apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || die "apt-get update 失败！请检查网络或更换其他国内源重试。"
+  echo "[INFO] apt-get update（3 次重试）..."
+  # 定义一个临时的 retry 函数
+  retry() {
+    local n=1
+    local max=$1
+    shift
+    while true; do
+      "$@" && break || {
+        if [[ $n -lt $max ]]; then
+          ((n++))
+          echo "[WARN] 命令失败，$n/$max 次重试后继续..."
+          sleep 1
+        else
+          return 1
+        fi
+      }
+    done
+  }
   
-  info "APT 源与更新准备就绪。"
+  retry 3 apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || { echo "[ERR ] apt-get update 最终失败！请检查网络。" >&2; exit 1; }
+  
+  echo "[INFO] APT 源与更新准备就绪。"
 }
-
 
 fix_apt_sources
 
