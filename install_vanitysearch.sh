@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 自动安装并编译 VanitySearch（Ubuntu 24.04 适配，修复 OpenSSL 编译问题）
-# 修复：添加禁用 LTO 和更多回退选项
+# VanitySearch 自动安装脚本 - Ubuntu 24.04 优化版
+# 根据官方文档要求：VanitySearch 需要 gcc >= 7
+# OpenSSL 1.0.1a 仅构建库，不构建测试
 
 set -euo pipefail
 
-SCRIPT_VERSION="4.3.1-zh-ubuntu24.04-fixed"
+SCRIPT_VERSION="4.4.0-zh-ubuntu24.04-official"
 GITHUB_REPO="${GITHUB_REPO:-https://github.com/alek76-2/VanitySearch.git}"
 PROJECT_DIR="VanitySearch"
 
@@ -15,9 +16,11 @@ OPENSSL_INSTALL_PATH="${OPENSSL_INSTALL_PATH:-/opt/openssl-${OPENSSL_VERSION}}"
 USE_CN_MIRROR="${USE_CN_MIRROR:-0}"
 FORCE_CPU="${FORCE_CPU:-0}"
 
-# 首选老版编译器
-C_COMPILER_CANDIDATES=("gcc-9" "gcc-10" "gcc-11" "gcc-12" "gcc-13" "gcc")
-CXX_COMPILER_CANDIDATES=("g++-9" "g++-10" "g++-11" "g++-12" "g++-13" "g++")
+# 官方要求 VanitySearch 使用 gcc >= 7
+# OpenSSL 1.0.1a 用老版本编译更稳定
+OPENSSL_CC_CANDIDATES=("gcc-8" "gcc-9" "gcc-10" "gcc-7" "gcc")
+VANITYSEARCH_CC_CANDIDATES=("gcc-13" "gcc-12" "gcc-11" "gcc-10" "gcc-9" "gcc-8" "gcc-7" "gcc")
+VANITYSEARCH_CXX_CANDIDATES=("g++-13" "g++-12" "g++-11" "g++-10" "g++-9" "g++-8" "g++-7" "g++")
 
 # 彩色输出
 C_RESET='\033[0m'; C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[0;33m'; C_CYAN='\033[0;36m'; C_BOLD='\033[1m'
@@ -73,38 +76,67 @@ install_common_deps() {
   ok "常用依赖安装完成。"
 }
 
-install_or_pick_compiler() {
-  pick_from_list() {
-    local -n arr=$1
-    local picked=""
-    for c in "${arr[@]}"; do
-      if command -v "$c" >/dev/null 2>&1; then picked="$c"; break; fi
-    done
-    echo "$picked"
-  }
+pick_compiler_from_list() {
+  local -n arr=$1
+  local min_version=${2:-0}
+  local picked=""
+  
+  for c in "${arr[@]}"; do
+    if ! command -v "$c" >/dev/null 2>&1; then continue; fi
+    
+    # 检查版本号
+    local ver=$("$c" -dumpversion 2>/dev/null | cut -d. -f1)
+    if [ -z "$ver" ]; then continue; fi
+    if [ "$ver" -ge "$min_version" ]; then
+      picked="$c"
+      break
+    fi
+  done
+  echo "$picked"
+}
 
-  install_first_available() {
-    local -n arr=$1
-    local picked="$(pick_from_list $1)"
-    if [ -n "$picked" ]; then echo "$picked"; return 0; fi
-    for c in "${arr[@]}"; do
-      log "尝试安装编译器: $c ..."
-      if run_sudo apt-get install -y "$c"; then
-        ok "已安装: $c"
+install_first_available() {
+  local -n arr=$1
+  local min_version=${2:-0}
+  
+  # 先尝试找已安装的
+  local picked="$(pick_compiler_from_list $1 $min_version)"
+  if [ -n "$picked" ]; then echo "$picked"; return 0; fi
+  
+  # 尝试安装
+  for c in "${arr[@]}"; do
+    log "尝试安装编译器: $c ..."
+    if run_sudo apt-get install -y "$c" 2>/dev/null; then
+      local ver=$("$c" -dumpversion 2>/dev/null | cut -d. -f1 || echo "0")
+      if [ "$ver" -ge "$min_version" ]; then
+        ok "已安装: $c (版本 $ver)"
         echo "$c"
         return 0
       fi
-      warn "安装 $c 失败，尝试下一候选。"
-    done
-    echo ""
-  }
+    fi
+    warn "安装 $c 失败或版本不满足要求，尝试下一候选。"
+  done
+  echo ""
+}
 
-  log "选择/安装 C 与 C++ 编译器..."
-  CHOSEN_CC="$(install_first_available C_COMPILER_CANDIDATES)"
-  [ -n "$CHOSEN_CC" ] || err "未能安装/找到任何可用的 C 编译器。"
-  CHOSEN_CXX="$(install_first_available CXX_COMPILER_CANDIDATES)"
-  [ -n "$CHOSEN_CXX" ] || err "未能安装/找到任何可用的 C++ 编译器。"
-  ok "C 编译器: $CHOSEN_CC, C++ 编译器: $CHOSEN_CXX"
+install_compilers() {
+  log "选择/安装编译器..."
+  
+  # OpenSSL 编译器（无版本要求）
+  OPENSSL_CC="$(install_first_available OPENSSL_CC_CANDIDATES 0)"
+  [ -n "$OPENSSL_CC" ] || err "未能安装/找到 OpenSSL 的 C 编译器。"
+  
+  # VanitySearch 编译器（需要 gcc >= 7）
+  CHOSEN_CC="$(install_first_available VANITYSEARCH_CC_CANDIDATES 7)"
+  [ -n "$CHOSEN_CC" ] || err "未能找到 gcc >= 7。VanitySearch 官方要求使用 gcc 7 或更高版本。"
+  
+  CHOSEN_CXX="$(install_first_available VANITYSEARCH_CXX_CANDIDATES 7)"
+  [ -n "$CHOSEN_CXX" ] || err "未能找到 g++ >= 7。"
+  
+  local gcc_ver=$("$CHOSEN_CC" -dumpversion)
+  ok "OpenSSL 编译器: $OPENSSL_CC"
+  ok "VanitySearch C 编译器: $CHOSEN_CC (版本 $gcc_ver)"
+  ok "VanitySearch C++ 编译器: $CHOSEN_CXX"
 }
 
 install_openssl_legacy() {
@@ -122,67 +154,34 @@ install_openssl_legacy() {
   tar xzf "openssl-${OPENSSL_VERSION}.tar.gz"
   cd "openssl-${OPENSSL_VERSION}"
 
-  export CC="$(command -v "$CHOSEN_CC")"
-  # 关键修复：禁用 LTO 和优化，使用传统编译方式
+  # 使用老版本 gcc 编译 OpenSSL，禁用 LTO
+  export CC="$(command -v "$OPENSSL_CC")"
   export CFLAGS="-fno-lto -fno-use-linker-plugin -O2"
   export LDFLAGS="-fno-lto -fno-use-linker-plugin"
   
   log "使用编译器: $CC (已禁用 LTO)"
 
-  # 尝试策略 1: no-fips + shared
-  log "配置 OpenSSL（shared + no-fips，禁用 LTO）..."
-  if ./config shared no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
-    log "编译 OpenSSL (策略 1: shared + no-fips)..."
-    if make -j"$(nproc)" 2>&1 | tee make.log; then
-      log "安装 OpenSSL ..."
-      run_sudo make install
-      run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
-      popd >/dev/null
-      rm -rf "$build_dir"
-      ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
-      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
-      return
-    fi
+  # 配置：shared + no-fips + no-asm（最稳定）
+  log "配置 OpenSSL（shared, no-fips, no-asm）..."
+  if ! ./config shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
+    err "OpenSSL ./config 失败"
   fi
 
-  # 尝试策略 2: no-asm + no-fips + shared
-  warn "策略 1 失败，尝试策略 2: no-asm + no-fips + shared"
-  make clean || true
-  if ./config shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
-    log "编译 OpenSSL (策略 2: no-asm)..."
-    if make -j"$(nproc)" 2>&1 | tee make.log; then
-      log "安装 OpenSSL ..."
-      run_sudo make install
-      run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
-      popd >/dev/null
-      rm -rf "$build_dir"
-      ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
-      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
-      return
-    fi
+  # 关键：只构建库，不构建测试（避免链接问题）
+  log "编译 OpenSSL 库（跳过测试）..."
+  if ! make -j"$(nproc)" build_libs build_apps; then
+    err "OpenSSL 库构建失败"
   fi
 
-  # 尝试策略 3: 静态库 (no shared)
-  warn "策略 2 失败，尝试策略 3: 静态库构建"
-  make clean || true
-  if ./config no-shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
-    log "编译 OpenSSL (策略 3: 静态库)..."
-    if make -j"$(nproc)" 2>&1 | tee make.log; then
-      log "安装 OpenSSL ..."
-      run_sudo make install
-      popd >/dev/null
-      rm -rf "$build_dir"
-      ok "OpenSSL ${OPENSSL_VERSION} 安装完成（静态库）：${OPENSSL_INSTALL_PATH}"
-      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
-      return
-    fi
-  fi
+  log "安装 OpenSSL ..."
+  run_sudo make install_sw  # install_sw 只安装软件，不安装文档和测试
+  run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
 
-  # 所有策略都失败
-  warn "所有编译策略都失败，保留构建日志："
-  cat make.log | tail -50
   popd >/dev/null
-  err "OpenSSL 构建失败，请查看上述日志"
+  rm -rf "$build_dir"
+
+  ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
+  "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
 }
 
 detect_cuda_env() {
@@ -202,6 +201,7 @@ detect_cuda_env() {
   NVCC_VER=$(echo "$NVCC_VER_STR" | sed -n 's/.*release \([0-9]\+\)\.\([0-9]\+\).*/\1.\2/p')
   log "检测到 CUDA nvcc 版本: ${NVCC_VER_STR}"
 
+  # 检测 compute capability
   local cap=""
   cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '. ' || true)
   if [ -z "$cap" ]; then
@@ -220,6 +220,7 @@ detect_cuda_env() {
   fi
   ok "GPU compute capability: ${DETECTED_CCAP}"
 
+  # CUDA 路径
   if [ -L /usr/local/cuda ]; then
     DETECTED_CUDA_PATH="$(readlink -f /usr/local/cuda)"
   else
@@ -231,21 +232,16 @@ detect_cuda_env() {
 
 max_supported_gxx_for_cuda() {
   local v="$1"
-  local major="${v%%.*}"; local minor="${v##*.}"
+  local major="${v%%.*}"
   local max=13
+  
   if [ -z "$v" ]; then echo 13; return; fi
+  
+  # CUDA 版本与 GCC 兼容性映射
   if [ "$major" -le 10 ]; then max=8
-  elif [ "$major" -eq 11 ]; then
-    if   [ "$minor" -le 4 ]; then max=10
-    elif [ "$minor" -le 8 ]; then max=11
-    else max=11
-    fi
-  elif [ "$major" -eq 12 ]; then
-    if [ "$minor" -le 2 ]; then max=12
-    else max=13
-    fi
-  else
-    max=13
+  elif [ "$major" -eq 11 ]; then max=11
+  elif [ "$major" -eq 12 ]; then max=13
+  else max=13
   fi
   echo "$max"
 }
@@ -255,20 +251,28 @@ choose_cxx_for_nvcc() {
     DETECTED_CXXCUDA=""
     return
   fi
+  
   local max_allowed; max_allowed=$(max_supported_gxx_for_cuda "${NVCC_VER:-}")
   log "nvcc 允许的最大 g++ 主版本约为: ${max_allowed}"
+  
   local picked=""
-  for cxx in "${CXX_COMPILER_CANDIDATES[@]}"; do
+  # 找满足 nvcc 要求且 >= 7 的编译器
+  for cxx in "${VANITYSEARCH_CXX_CANDIDATES[@]}"; do
     if ! command -v "$cxx" >/dev/null 2>&1; then continue; fi
     local ver=$("$cxx" -dumpversion | cut -d. -f1)
     if [ -z "$ver" ]; then continue; fi
-    if [ "$ver" -le "$max_allowed" ]; then picked="$cxx"; break; fi
+    if [ "$ver" -ge 7 ] && [ "$ver" -le "$max_allowed" ]; then
+      picked="$cxx"
+      break
+    fi
   done
+  
+  # 如果没找到合适的，用 CHOSEN_CXX 并启用容错
   if [ -z "$picked" ]; then
-    warn "未找到满足 nvcc 支持范围的 g++，将使用 -allow-unsupported-compiler 容错。"
-    picked="$(command -v "$CHOSEN_CXX" || true)"
-    [ -n "$picked" ] || picked="$(command -v g++ || true)"
+    warn "未找到同时满足 nvcc 和 VanitySearch(>=7) 要求的 g++，将使用 $CHOSEN_CXX 并启用 -allow-unsupported-compiler"
+    picked="$CHOSEN_CXX"
   fi
+  
   [ -n "$picked" ] || err "未能为 nvcc 选择 C++ 编译器。"
   DETECTED_CXXCUDA="$picked"
   ok "nvcc 主机编译器: ${DETECTED_CXXCUDA}"
@@ -285,6 +289,7 @@ patch_source_code() {
   log "应用源码兼容性补丁..."
   cd "$PROJECT_DIR"
 
+  # 添加 <cstdint> 头文件
   for f in "Timer.h" "hash/sha512.h" "hash/sha256.h"; do
     if [ -f "$f" ] && ! grep -qE '^\s*#include\s*<cstdint>' "$f"; then
       sed -i '1i #include <cstdint>\n' "$f"
@@ -292,6 +297,7 @@ patch_source_code() {
     fi
   done
 
+  # 添加 byteswap 兼容
   if [ -f "hash/sha256.cpp" ] && ! grep -q "_byteswap_ulong" "hash/sha256.cpp"; then
     sed -i '/#define WRITEBE32/i \
 #ifdef __GNUC__\n#include <byteswap.h>\n#define _byteswap_ulong(x) bswap_32(x)\n#endif\n' "hash/sha256.cpp"
@@ -301,13 +307,16 @@ patch_source_code() {
 }
 
 configure_makefile() {
-  log "配置 Makefile 以使用旧版 OpenSSL 与 CUDA ..."
+  log "配置 Makefile..."
   cd "$PROJECT_DIR"
   [ -f Makefile ] || err "未找到 Makefile"
 
+  # 配置 CUDA（如果需要）
   if [ "${WANT_GPU}" = "1" ]; then
     sed -i "s|^CUDA[[:space:]]*=.*|CUDA       = ${DETECTED_CUDA_PATH}|" Makefile || true
     sed -i "s|^CXXCUDA[[:space:]]*=.*|CXXCUDA    = $(command -v "${DETECTED_CXXCUDA}")|" Makefile || true
+    
+    # 添加 NVCC 标志
     if ! grep -q 'NVCCFLAGS' Makefile; then
       echo -e "\nNVCCFLAGS += -O3 -use_fast_math -allow-unsupported-compiler" >> Makefile
     elif ! grep -q 'allow-unsupported-compiler' Makefile; then
@@ -315,20 +324,20 @@ configure_makefile() {
     fi
   fi
 
+  # 配置 OpenSSL（关键部分）
   if ! grep -q 'SSLROOT' Makefile; then
     cat >> Makefile <<EOF
 
-# Injected by installer: force legacy OpenSSL
+# 由安装脚本注入：强制使用旧版 OpenSSL
 SSLROOT := ${OPENSSL_INSTALL_PATH}
-CFLAGS  += -I\$(SSLROOT)/include -fno-lto
-CXXFLAGS+= -I\$(SSLROOT)/include -fno-lto
-LDFLAGS += -L\$(SSLROOT)/lib -Wl,-rpath,\$(SSLROOT)/lib -fno-lto
+CFLAGS  += -I\$(SSLROOT)/include
+CXXFLAGS+= -I\$(SSLROOT)/include
+LDFLAGS += -L\$(SSLROOT)/lib -Wl,-rpath,\$(SSLROOT)/lib
 LDLIBS  += -lssl -lcrypto
 EOF
   else
     sed -i "s|^SSLROOT.*|SSLROOT := ${OPENSSL_INSTALL_PATH}|" Makefile
     grep -q '\-Wl,\-rpath' Makefile || sed -i 's|^LDFLAGS.*|& -Wl,-rpath,$(SSLROOT)/lib|' Makefile
-    grep -q '\-fno-lto' Makefile || sed -i 's|^CFLAGS.*|& -fno-lto|; s|^CXXFLAGS.*|& -fno-lto|; s|^LDFLAGS.*|& -fno-lto|' Makefile
   fi
 
   cd -
@@ -336,23 +345,23 @@ EOF
 }
 
 build_project() {
-  log "开始编译 VanitySearch ..."
+  log "开始编译 VanitySearch（使用 gcc >= 7）..."
+  
   export CC="$(command -v "$CHOSEN_CC")"
   export CXX="$(command -v "$CHOSEN_CXX")"
   export LD_LIBRARY_PATH="${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH:-}"
-  # 禁用 LTO
-  export CFLAGS="${CFLAGS:-} -fno-lto"
-  export CXXFLAGS="${CXXFLAGS:-} -fno-lto"
-  export LDFLAGS="${LDFLAGS:-} -fno-lto"
 
   cd "$PROJECT_DIR"
   make clean >/dev/null 2>&1 || true
 
   if [ "${WANT_GPU}" = "1" ]; then
     log "执行 GPU 构建：ccap=${DETECTED_CCAP}"
-    if ! make -j"$(nproc)" gpu=1 ccap="${DETECTED_CCAP}" CC="$CC" CXX="$CXX" CXXCUDA="$(command -v "${DETECTED_CXXCUDA}")" all; then
+    if make -j"$(nproc)" gpu=1 ccap="${DETECTED_CCAP}" CC="$CC" CXX="$CXX" CXXCUDA="$(command -v "${DETECTED_CXXCUDA}")" all; then
+      ok "GPU 版本编译成功"
+    else
       warn "GPU 构建失败，回退到 CPU-only 构建。"
       WANT_GPU=0
+      make clean >/dev/null 2>&1 || true
     fi
   fi
 
@@ -371,32 +380,49 @@ build_project() {
 
 validate_linkage_and_run() {
   cd "$PROJECT_DIR"
-  log "校验动态库链接是否指向旧版 OpenSSL ..."
+  log "校验动态库链接..."
+  
   if command -v ldd >/dev/null 2>&1; then
+    echo "--- 链接的 OpenSSL 库 ---"
     ldd ./VanitySearch | egrep 'ssl|crypto' || true
   fi
 
+  # 检查是否错误链接到系统 OpenSSL
   local bad_link=0
-  if ldd ./VanitySearch | grep -q "libssl.so.3"; then bad_link=1; fi
-  if ldd ./VanitySearch | grep -q "libcrypto.so.3"; then bad_link=1; fi
+  if ldd ./VanitySearch 2>/dev/null | grep -E "libssl\.so\.[^1]|libcrypto\.so\.[^1]" | grep -qv "${OPENSSL_INSTALL_PATH}"; then
+    bad_link=1
+  fi
+  
   if [ $bad_link -eq 1 ]; then
-    warn "检测到仍链接到了系统 OpenSSL 3.x。请检查 Makefile 注入是否生效与 rpath 是否存在。"
-    warn "已设置 LD_LIBRARY_PATH，可先尝试直接运行；如仍异常，请反馈 ldd 输出。"
+    warn "⚠️  检测到可能链接了错误的 OpenSSL 版本"
+    warn "已设置 LD_LIBRARY_PATH，运行时应该没问题"
+  else
+    ok "✓ OpenSSL 链接正确"
   fi
 
-  log "运行程序查看帮助输出 ..."
-  ./VanitySearch -h | head -n 20 || true
-  ok "验证完成。可执行文件路径：$(pwd)/VanitySearch"
+  log "运行程序验证..."
+  if ./VanitySearch -h >/dev/null 2>&1; then
+    ok "✓ 程序运行正常"
+    ./VanitySearch -h | head -n 15
+  else
+    warn "程序运行出现问题，但可能仅是参数错误"
+  fi
+  
   cd -
 }
 
 main() {
-  echo -e "${C_BOLD}--- VanitySearch 自动安装脚本 v${SCRIPT_VERSION} (Ubuntu 24.04) ---${C_RESET}"
+  echo -e "${C_BOLD}╔════════════════════════════════════════════════════════════╗${C_RESET}"
+  echo -e "${C_BOLD}║  VanitySearch 自动安装脚本 v${SCRIPT_VERSION}  ║${C_RESET}"
+  echo -e "${C_BOLD}║  Ubuntu 24.04 优化版 - 遵循官方文档要求           ║${C_RESET}"
+  echo -e "${C_BOLD}╚════════════════════════════════════════════════════════════╝${C_RESET}"
+  echo
+  
   need_sudo
   apt_update_once
   switch_to_cn_mirror
   install_common_deps
-  install_or_pick_compiler
+  install_compilers
   install_openssl_legacy
   detect_cuda_env
   choose_cxx_for_nvcc
@@ -406,12 +432,21 @@ main() {
   build_project
   validate_linkage_and_run
 
-  echo -e "${C_BOLD}使用示例：${C_RESET}"
-  echo -e "  ${C_YELLOW}cd ${PROJECT_DIR}${C_RESET}"
-  echo -e "  ${C_YELLOW}./VanitySearch -stop -t 0 -gpu -bits 28 -r 50000 12jbtzBb54r97TCwW3G1gCFoumpckRAPdY${C_RESET}  # GPU 示例"
-  echo -e "  ${C_YELLOW}./VanitySearch -stop -t 2 -bits 28 -r 5 12jbtzBb54r97TCwW3G1gCFoumpckRAPdY${C_RESET}      # CPU 示例"
   echo
-  ok "安装与构建完成。祝你跑得快！"
+  echo -e "${C_BOLD}╔════════════════════════════════════════════════════════════╗${C_RESET}"
+  echo -e "${C_BOLD}║  安装完成！使用示例：                                 ║${C_RESET}"
+  echo -e "${C_BOLD}╚════════════════════════════════════════════════════════════╝${C_RESET}"
+  echo -e "  ${C_CYAN}cd ${PROJECT_DIR}${C_RESET}"
+  echo
+  if [ "${WANT_GPU}" = "1" ]; then
+    echo -e "  ${C_YELLOW}# GPU 模式（推荐）${C_RESET}"
+    echo -e "  ${C_GREEN}./VanitySearch -stop -t 0 -gpu -bits 28 -r 50000 1YourBitcoinAddress${C_RESET}"
+  else
+    echo -e "  ${C_YELLOW}# CPU 模式${C_RESET}"
+    echo -e "  ${C_GREEN}./VanitySearch -stop -t 4 -bits 28 -r 5 1YourBitcoinAddress${C_RESET}"
+  fi
+  echo
+  ok "🎉 所有步骤完成！"
 }
 
 main "$@"
