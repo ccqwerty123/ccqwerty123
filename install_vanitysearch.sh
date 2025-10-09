@@ -71,28 +71,43 @@ require_root_or_sudo
 # Step 1: 修正 APT 源并更新（带回退）
 # =========================
 #
-# 自动修复并更新 APT 源的函数 (v3 - 专为 'curl | sudo bash' 设计)
+# 自动修复并更新 APT 源的函数 (v3.1 - 解决锁问题和管道执行冲突)
 #
 fix_apt_sources() {
-  # --- 权限检查 ---
-  # 确保脚本是以 root 权限运行的，否则无法执行后续操作
+  local version="3.1"
+  info "运行 fix_apt_sources 函数 (版本: ${version})..."
+
+  # --- 1. 权限检查 (必须在外部以 root 执行) ---
   if [[ $EUID -ne 0 ]]; then
-    error "错误：此函数必须以 root 权限运行。"
-    error "请尝试使用 'sudo' 来执行整个脚本，例如: curl ... | sudo bash"
-    return 1 # 返回错误码
+    error "错误：此安装脚本必须以 root 权限运行！"
+    error "请使用 'sudo ./脚本名' 或 'curl ... | sudo bash' 方式执行。"
+    return 1 # 退出函数
   fi
 
-  # 内部辅助函数：强制解锁 APT 系统 (已移除 sudo)
+  # 内部辅助函数：强制解锁 APT 系统
   force_unlock_apt() {
     info "正在检查 APT 系统锁..."
+
+    # 检查 fuser 命令是否存在
+    if ! command -v fuser &> /dev/null; then
+        warn "fuser 命令未找到！尝试安装 psmisc 包..."
+        # 注意：这里调用 apt-get install 可能会再次失败，但我们必须尝试
+        apt-get update -o Acquire::Retries=3 && apt-get install -y psmisc
+        if [ $? -ne 0 ]; then
+             error "FATAL: 无法安装 fuser 依赖包！请手动安装 psmisc 后重试。"
+             return 1
+        fi
+        info "psmisc 包安装成功，继续解锁流程。"
+    fi
+
     local lock_pid
-    # 使用 fuser 查找占用锁文件的进程 PID
+    # 使用 fuser 查找占用锁文件的进程 PID (无需 sudo，因为脚本已经是 root)
     lock_pid=$(fuser /var/lib/dpkg/lock 2>/dev/null) || lock_pid=$(fuser /var/lib/apt/lists/lock 2>/dev/null)
 
     if [ -n "$lock_pid" ]; then
       warn "检测到 APT 锁被进程 ${lock_pid} 占用！正在尝试自动修复..."
       info "正在终止进程: ${lock_pid}..."
-      kill -9 "${lock_pid}"
+      kill -9 "${lock_pid}" || { error "FATAL: 无法终止进程 ${lock_pid}，请手动处理！"; return 1; }
       sleep 1
 
       info "正在移除残留的锁文件..."
@@ -111,14 +126,16 @@ fix_apt_sources() {
 
   # --- 主逻辑开始 ---
 
-  # 1. 首先，调用解锁函数，确保 apt 系统可用
-  force_unlock_apt
+  # 2. 调用解锁函数
+  if ! force_unlock_apt; then
+      die "APT 系统解锁失败，安装中止。"
+  fi
 
-  # 2. 备份现有 APT 源
+  # 3. 备份现有 APT 源
   info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
   cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
 
-  # 3. 写入国内镜像源
+  # 4. 写入国内镜像源
   info "写入国内镜像源（清华大学 TUNA 源）..."
   bash -c "cat > '${APT_LIST}'" <<EOF
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -127,12 +144,14 @@ deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports ma
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
-  # 4. 更新软件包列表
+  # 5. 更新软件包列表
   info "apt-get update（3 次重试）..."
-  retry 3 apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || die "apt-get update 失败，请检查网络或更换其他国内源重试。"
+  # -o Acquire::Check-Valid-Until=false: 避免因容器时间不准导致源验证失败
+  retry 3 apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || die "apt-get update 失败！请检查网络或更换其他国内源重试。"
   
   info "APT 源与更新准备就绪。"
 }
+
 
 fix_apt_sources
 
