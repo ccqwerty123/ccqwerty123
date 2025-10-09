@@ -1,29 +1,23 @@
 #!/usr/bin/env bash
-# 自动安装并编译 VanitySearch（Ubuntu 24.04 适配，旧版 OpenSSL 强制链接）
-# - 安装/编译 OpenSSL 1.0.1a 到 /opt/openssl-1.0.1a（no-fips，失败回退 no-asm）
-# - 自动选择并安装可用的 gcc/g++ 版本
-# - 自动检测 CUDA/ccap，优先 GPU 编译，失败回退 CPU-only
-# - 强制 rpath 指向旧版 OpenSSL，避免运行期误连系统 OpenSSL 1.1/3.0
-# - 对源码应用必要补丁（<cstdint>、byteswap 宏等）
-# - Ubuntu 24.04 (noble) 亲测路径与机制
+# 自动安装并编译 VanitySearch（Ubuntu 24.04 适配，修复 OpenSSL 编译问题）
+# 修复：添加禁用 LTO 和更多回退选项
 
 set -euo pipefail
 
-SCRIPT_VERSION="4.3.0-zh-ubuntu24.04"
-# 可通过环境变量覆盖
-GITHUB_REPO="${GITHUB_REPO:-https://github.com/allinbit/VanitySearch.git}"
+SCRIPT_VERSION="4.3.1-zh-ubuntu24.04-fixed"
+GITHUB_REPO="${GITHUB_REPO:-https://github.com/alek76-2/VanitySearch.git}"
 PROJECT_DIR="VanitySearch"
 
 OPENSSL_VERSION="${OPENSSL_VERSION:-1.0.1a}"
 OPENSSL_URL="${OPENSSL_URL:-https://www.openssl.org/source/old/1.0.1/openssl-${OPENSSL_VERSION}.tar.gz}"
 OPENSSL_INSTALL_PATH="${OPENSSL_INSTALL_PATH:-/opt/openssl-${OPENSSL_VERSION}}"
 
-USE_CN_MIRROR="${USE_CN_MIRROR:-0}"   # 设置为 1 切换为清华源
-FORCE_CPU="${FORCE_CPU:-0}"           # 设置为 1 强制 CPU-only 构建
+USE_CN_MIRROR="${USE_CN_MIRROR:-0}"
+FORCE_CPU="${FORCE_CPU:-0}"
 
-# 首选老版编译器以提高 OpenSSL 1.0.1a 兼容性；在 24.04 中 g++-12/13 常可用
-C_COMPILER_CANDIDATES=("gcc-9" "gcc-12" "gcc-11" "gcc-10" "gcc-13" "gcc")
-CXX_COMPILER_CANDIDATES=("g++-9" "g++-12" "g++-11" "g++-10" "g++-13" "g++")
+# 首选老版编译器
+C_COMPILER_CANDIDATES=("gcc-9" "gcc-10" "gcc-11" "gcc-12" "gcc-13" "gcc")
+CXX_COMPILER_CANDIDATES=("g++-9" "g++-10" "g++-11" "g++-12" "g++-13" "g++")
 
 # 彩色输出
 C_RESET='\033[0m'; C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[0;33m'; C_CYAN='\033[0;36m'; C_BOLD='\033[1m'
@@ -129,30 +123,66 @@ install_openssl_legacy() {
   cd "openssl-${OPENSSL_VERSION}"
 
   export CC="$(command -v "$CHOSEN_CC")"
-  log "使用编译器: $CC"
+  # 关键修复：禁用 LTO 和优化，使用传统编译方式
+  export CFLAGS="-fno-lto -fno-use-linker-plugin -O2"
+  export LDFLAGS="-fno-lto -fno-use-linker-plugin"
+  
+  log "使用编译器: $CC (已禁用 LTO)"
 
-  log "配置 OpenSSL（shared + no-fips）..."
-  if ! ./config shared no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
-    err "OpenSSL ./config 失败"
+  # 尝试策略 1: no-fips + shared
+  log "配置 OpenSSL（shared + no-fips，禁用 LTO）..."
+  if ./config shared no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
+    log "编译 OpenSSL (策略 1: shared + no-fips)..."
+    if make -j"$(nproc)" 2>&1 | tee make.log; then
+      log "安装 OpenSSL ..."
+      run_sudo make install
+      run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
+      popd >/dev/null
+      rm -rf "$build_dir"
+      ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
+      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
+      return
+    fi
   fi
 
-  log "编译 OpenSSL ..."
-  if ! make -j"$(nproc)"; then
-    warn "常规编译失败，使用 no-asm 回退重试（在新架构上常见）"
-    make clean || true
-    ./config shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}" || err "config(no-asm) 失败"
-    make -j"$(nproc)" || err "OpenSSL 构建失败"
+  # 尝试策略 2: no-asm + no-fips + shared
+  warn "策略 1 失败，尝试策略 2: no-asm + no-fips + shared"
+  make clean || true
+  if ./config shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
+    log "编译 OpenSSL (策略 2: no-asm)..."
+    if make -j"$(nproc)" 2>&1 | tee make.log; then
+      log "安装 OpenSSL ..."
+      run_sudo make install
+      run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
+      popd >/dev/null
+      rm -rf "$build_dir"
+      ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
+      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
+      return
+    fi
   fi
 
-  log "安装 OpenSSL ..."
-  run_sudo make install
-  run_sudo ldconfig "${OPENSSL_INSTALL_PATH}/lib" || true
+  # 尝试策略 3: 静态库 (no shared)
+  warn "策略 2 失败，尝试策略 3: 静态库构建"
+  make clean || true
+  if ./config no-shared no-asm no-fips --prefix="${OPENSSL_INSTALL_PATH}"; then
+    log "编译 OpenSSL (策略 3: 静态库)..."
+    if make -j"$(nproc)" 2>&1 | tee make.log; then
+      log "安装 OpenSSL ..."
+      run_sudo make install
+      popd >/dev/null
+      rm -rf "$build_dir"
+      ok "OpenSSL ${OPENSSL_VERSION} 安装完成（静态库）：${OPENSSL_INSTALL_PATH}"
+      "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
+      return
+    fi
+  fi
 
+  # 所有策略都失败
+  warn "所有编译策略都失败，保留构建日志："
+  cat make.log | tail -50
   popd >/dev/null
-  rm -rf "$build_dir"
-
-  ok "OpenSSL ${OPENSSL_VERSION} 安装完成：${OPENSSL_INSTALL_PATH}"
-  "${OPENSSL_INSTALL_PATH}/bin/openssl" version -a || true
+  err "OpenSSL 构建失败，请查看上述日志"
 }
 
 detect_cuda_env() {
@@ -169,10 +199,9 @@ detect_cuda_env() {
   fi
 
   NVCC_VER_STR=$(nvcc --version | grep -i "release" || true)
-  NVCC_VER=$(echo "$NVCC_VER_STR" | sed -n 's/.*release KATEX_INLINE_OPEN[0-9]\+KATEX_INLINE_CLOSE\.KATEX_INLINE_OPEN[0-9]\+KATEX_INLINE_CLOSE.*/\1.\2/p')
+  NVCC_VER=$(echo "$NVCC_VER_STR" | sed -n 's/.*release \([0-9]\+\)\.\([0-9]\+\).*/\1.\2/p')
   log "检测到 CUDA nvcc 版本: ${NVCC_VER_STR}"
 
-  # 检测 compute capability
   local cap=""
   cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '. ' || true)
   if [ -z "$cap" ]; then
@@ -191,7 +220,6 @@ detect_cuda_env() {
   fi
   ok "GPU compute capability: ${DETECTED_CCAP}"
 
-  # CUDA 路径
   if [ -L /usr/local/cuda ]; then
     DETECTED_CUDA_PATH="$(readlink -f /usr/local/cuda)"
   else
@@ -202,7 +230,6 @@ detect_cuda_env() {
 }
 
 max_supported_gxx_for_cuda() {
-  # 粗略映射，覆盖常见版本（若不匹配将通过 -allow-unsupported-compiler 容错）
   local v="$1"
   local major="${v%%.*}"; local minor="${v##*.}"
   local max=13
@@ -231,14 +258,12 @@ choose_cxx_for_nvcc() {
   local max_allowed; max_allowed=$(max_supported_gxx_for_cuda "${NVCC_VER:-}")
   log "nvcc 允许的最大 g++ 主版本约为: ${max_allowed}"
   local picked=""
-  # 依次找满足 <= max_allowed 的 g++-X
   for cxx in "${CXX_COMPILER_CANDIDATES[@]}"; do
     if ! command -v "$cxx" >/dev/null 2>&1; then continue; fi
     local ver=$("$cxx" -dumpversion | cut -d. -f1)
     if [ -z "$ver" ]; then continue; fi
     if [ "$ver" -le "$max_allowed" ]; then picked="$cxx"; break; fi
   done
-  # 如果都没有，退而求其次：选一个可用的，并启用 -allow-unsupported-compiler
   if [ -z "$picked" ]; then
     warn "未找到满足 nvcc 支持范围的 g++，将使用 -allow-unsupported-compiler 容错。"
     picked="$(command -v "$CHOSEN_CXX" || true)"
@@ -260,7 +285,6 @@ patch_source_code() {
   log "应用源码兼容性补丁..."
   cd "$PROJECT_DIR"
 
-  # 为部分头文件添加 <cstdint>
   for f in "Timer.h" "hash/sha512.h" "hash/sha256.h"; do
     if [ -f "$f" ] && ! grep -qE '^\s*#include\s*<cstdint>' "$f"; then
       sed -i '1i #include <cstdint>\n' "$f"
@@ -268,7 +292,6 @@ patch_source_code() {
     fi
   done
 
-  # 为 sha256.cpp 添加 _byteswap_ulong 兼容
   if [ -f "hash/sha256.cpp" ] && ! grep -q "_byteswap_ulong" "hash/sha256.cpp"; then
     sed -i '/#define WRITEBE32/i \
 #ifdef __GNUC__\n#include <byteswap.h>\n#define _byteswap_ulong(x) bswap_32(x)\n#endif\n' "hash/sha256.cpp"
@@ -282,11 +305,9 @@ configure_makefile() {
   cd "$PROJECT_DIR"
   [ -f Makefile ] || err "未找到 Makefile"
 
-  # 设置 CUDA 路径与 nvcc 主机编译器
   if [ "${WANT_GPU}" = "1" ]; then
     sed -i "s|^CUDA[[:space:]]*=.*|CUDA       = ${DETECTED_CUDA_PATH}|" Makefile || true
     sed -i "s|^CXXCUDA[[:space:]]*=.*|CXXCUDA    = $(command -v "${DETECTED_CXXCUDA}")|" Makefile || true
-    # 容错编译器版本（若超纲）
     if ! grep -q 'NVCCFLAGS' Makefile; then
       echo -e "\nNVCCFLAGS += -O3 -use_fast_math -allow-unsupported-compiler" >> Makefile
     elif ! grep -q 'allow-unsupported-compiler' Makefile; then
@@ -294,21 +315,20 @@ configure_makefile() {
     fi
   fi
 
-  # 强制链接指定 OpenSSL
   if ! grep -q 'SSLROOT' Makefile; then
     cat >> Makefile <<EOF
 
 # Injected by installer: force legacy OpenSSL
 SSLROOT := ${OPENSSL_INSTALL_PATH}
-CFLAGS  += -I\$(SSLROOT)/include
-CXXFLAGS+= -I\$(SSLROOT)/include
-LDFLAGS += -L\$(SSLROOT)/lib -Wl,-rpath,\$(SSLROOT)/lib
+CFLAGS  += -I\$(SSLROOT)/include -fno-lto
+CXXFLAGS+= -I\$(SSLROOT)/include -fno-lto
+LDFLAGS += -L\$(SSLROOT)/lib -Wl,-rpath,\$(SSLROOT)/lib -fno-lto
 LDLIBS  += -lssl -lcrypto
 EOF
   else
-    # 若已有，确保包含 rpath 与包含目录
     sed -i "s|^SSLROOT.*|SSLROOT := ${OPENSSL_INSTALL_PATH}|" Makefile
     grep -q '\-Wl,\-rpath' Makefile || sed -i 's|^LDFLAGS.*|& -Wl,-rpath,$(SSLROOT)/lib|' Makefile
+    grep -q '\-fno-lto' Makefile || sed -i 's|^CFLAGS.*|& -fno-lto|; s|^CXXFLAGS.*|& -fno-lto|; s|^LDFLAGS.*|& -fno-lto|' Makefile
   fi
 
   cd -
@@ -320,6 +340,10 @@ build_project() {
   export CC="$(command -v "$CHOSEN_CC")"
   export CXX="$(command -v "$CHOSEN_CXX")"
   export LD_LIBRARY_PATH="${OPENSSL_INSTALL_PATH}/lib:${LD_LIBRARY_PATH:-}"
+  # 禁用 LTO
+  export CFLAGS="${CFLAGS:-} -fno-lto"
+  export CXXFLAGS="${CXXFLAGS:-} -fno-lto"
+  export LDFLAGS="${LDFLAGS:-} -fno-lto"
 
   cd "$PROJECT_DIR"
   make clean >/dev/null 2>&1 || true
@@ -352,7 +376,6 @@ validate_linkage_and_run() {
     ldd ./VanitySearch | egrep 'ssl|crypto' || true
   fi
 
-  # 期望 libssl.so.1.0.0/libcrypto.so.1.0.0 来自 OPENSSL_INSTALL_PATH
   local bad_link=0
   if ldd ./VanitySearch | grep -q "libssl.so.3"; then bad_link=1; fi
   if ldd ./VanitySearch | grep -q "libcrypto.so.3"; then bad_link=1; fi
