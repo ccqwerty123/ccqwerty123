@@ -2,23 +2,24 @@
 #
 # alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# 版本: 3.2.0-zh
+# 版本: 3.3.0-zh
 #
 # 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
 #
 # ==============================================================================
-# v3.2.0 更新日志:
-# - 新增: APT 源健康检查与自动修复机制。脚本在执行 'apt update' 前, 会先
-#   模拟更新以检测返回错误的源文件 (如 404 Not Found)。
-# - 新增: 安全的临时禁用与自动恢复功能。如果检测到问题源 (例如 modular.list),
-#   脚本会征求用户同意 (带超时确认), 将其临时重命名。
-# - 新增: 使用 'trap' 命令确保无论脚本如何退出 (成功、失败、被中断),
-#   被禁用的源文件都会被自动恢复, 保证了系统的完整性。
+# v3.3.0 更新日志:
+# - 核心变更: 采用全新的"直接替换软件源"策略，以应对复杂的网络和系统配置问题。
+# - 新增: 自动备份用户原始的 APT 源配置到一个临时目录。
+# - 新增: 根据检测到的 Ubuntu 系统代号, 动态生成一份仅包含国内镜像
+#   (清华大学 Tuna 源) 的临时 sources.list 文件。
+# - 强化: 依然使用 'trap' 机制确保无论脚本如何退出，用户的原始软件源配置
+#   都将被完美恢复，保障系统安全。
+# - 移除: 移除了 v3.2 中的诊断和逐个禁用逻辑，改为更高效、更直接的整体替换。
 # ==============================================================================
 #
 # 功能特性:
-# - [v3.2+] 自动诊断并安全地临时修复损坏的 APT 软件源。
+# - [v3.3+] 自动备份并临时替换为国内高速 APT 镜像源。
 # - [v3.1+] 自动检查并尝试安装缺失的旧版本编译器 (g++-9)。
 # - 智能检测 NVIDIA 驱动和 CUDA 工具包及 GPU 计算能力。
 # - 自动修复源代码中的 C++ 兼容性错误。
@@ -27,13 +28,11 @@
 #
 
 # --- 配置信息 ---
-SCRIPT_VERSION="3.2.0-zh"
+SCRIPT_VERSION="3.3.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
-REQUIRED_PKGS=("build-essential" "git" "libssl-dev")
 COMPATIBLE_COMPILERS=("g++-9" "g++-8" "g++-7")
-MAX_RETRIES=3
-DISABLED_SOURCES_FILES=() # 用于记录被禁用的源文件
+APT_BACKUP_DIR="" # 用于记录 APT 备份目录
 
 # --- Shell 安全设置与颜色定义 ---
 set -o errexit
@@ -56,65 +55,84 @@ log_error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
 
 # --- 核心功能函数 ---
 
-# 恢复被临时禁用的 APT 源文件。此函数由 trap 调用，确保总能执行。
-cleanup_sources() {
-    if [ ${#DISABLED_SOURCES_FILES[@]} -gt 0 ]; then
-        log_info "正在恢复被临时禁用的 APT 源文件..."
-        for src_file in "${DISABLED_SOURCES_FILES[@]}"; do
-            if [ -f "${src_file}.disabled_by_script" ]; then
-                sudo mv "${src_file}.disabled_by_script" "$src_file"
-                log_success "已恢复 $src_file"
-            fi
-        done
-    fi
-}
-
-# 设置 trap，无论脚本如何退出，都执行 cleanup_sources 函数
-trap cleanup_sources EXIT
-
-# APT 源健康检查与修复
-check_and_fix_apt_sources() {
-    log_info "正在进行 APT 软件源健康检查..."
-    local update_output
-    # 使用 sudo -E 保留环境变量, 捕获 stderr, 超时 60 秒
-    update_output=$(sudo -E apt-get update 2>&1) || true
-    
-    # 查找返回 403, 404 等错误的行，并提取文件名
-    local problem_files
-    problem_files=$(echo "$update_output" | grep -E 'Err:|Fehler:' | grep -oP '(?<=InRelease ).*' | xargs -I {} find /etc/apt/sources.list.d/ -name '*.list' -exec grep -l "{}" {} + | sort -u)
-
-    if [ -z "$problem_files" ]; then
-        log_success "APT 软件源健康状况良好。"
-        return
-    fi
-    
-    log_warn "检测到以下 APT 源文件可能存在问题:"
-    echo -e "${C_YELLOW}$problem_files${C_RESET}"
-    
-    echo -e -n "${C_YELLOW}是否允许脚本临时禁用这些文件以继续安装？(Y/n) [将在 15 秒后自动确认]: ${C_RESET}"
-    local user_input=""
-    if read -t 15 user_input; then
-        if [[ "$user_input" =~ ^[Nn]$ ]]; then
-            log_error "用户拒绝修复。请手动修复 APT 源后重试: sudo apt update"
+# 恢复被备份的 APT 源配置。此函数由 trap 调用，确保总能执行。
+cleanup_apt_sources() {
+    if [ -n "$APT_BACKUP_DIR" ] && [ -d "$APT_BACKUP_DIR" ]; then
+        log_info "正在恢复原始的 APT 软件源配置..."
+        # 强制删除临时创建的源文件和目录
+        sudo rm -f /etc/apt/sources.list
+        sudo rm -rf /etc/apt/sources.list.d
+        # 恢复备份
+        if [ -f "$APT_BACKUP_DIR/sources.list" ]; then
+            sudo mv "$APT_BACKUP_DIR/sources.list" /etc/apt/
         fi
-    else
-        echo ""
-        log_info "超时无响应，已默认选择 '是'。"
+        if [ -d "$APT_BACKUP_DIR/sources.list.d" ]; then
+            sudo mv "$APT_BACKUP_DIR/sources.list.d" /etc/apt/
+        fi
+        # 清理备份目录
+        sudo rm -rf "$APT_BACKUP_DIR"
+        log_success "原始 APT 源配置已恢复。"
+        # 再次更新以使原始配置生效
+        log_info "正在使用恢复后的源配置执行一次 apt update..."
+        sudo apt-get update || log_warn "使用原始配置更新时出现问题，这可能是正常现象。"
     fi
-
-    for file_to_disable in $problem_files; do
-        log_info "正在临时禁用: $file_to_disable"
-        sudo mv "$file_to_disable" "${file_to_disable}.disabled_by_script"
-        DISABLED_SOURCES_FILES+=("$file_to_disable")
-        log_success "已临时禁用 $file_to_disable"
-    done
-    
-    log_info "正在重新运行 APT 更新以确认修复..."
-    if ! sudo apt-get update; then
-        log_error "即使在禁用问题源后, 'apt update' 依然失败。请手动检查您的 APT 配置。"
-    fi
-    log_success "APT 更新成功，问题已临时解决。"
 }
+
+# 设置 trap，无论脚本如何退出，都执行 cleanup_apt_sources 函数
+trap cleanup_apt_sources EXIT
+
+# 临时替换为国内镜像源
+override_apt_sources() {
+    log_info "为了确保安装过程顺利，将临时替换为国内高速镜像源 (清华大学 Tuna 源)。"
+    
+    # 1. 创建备份目录
+    APT_BACKUP_DIR=$(mktemp -d /tmp/apt_backup_XXXXXX)
+    log_info "原始 APT 配置将被备份到: $APT_BACKUP_DIR"
+    
+    # 2. 备份原始配置
+    if [ -f "/etc/apt/sources.list" ]; then
+        sudo mv /etc/apt/sources.list "$APT_BACKUP_DIR/"
+    fi
+    if [ -d "/etc/apt/sources.list.d" ]; then
+        sudo mv /etc/apt/sources.list.d "$APT_BACKUP_DIR/"
+    fi
+    log_success "原始 APT 配置已备份。"
+
+    # 3. 获取系统代号
+    local codename
+    if ! codename=$(. /etc/os-release && echo "$VERSION_CODENAME"); then
+        log_error "无法自动检测 Ubuntu 系统代号。脚本无法继续。"
+    fi
+    log_info "检测到系统代号为: $codename"
+    
+    # 4. 创建新的 sources.list 文件
+    log_info "正在生成新的 sources.list 文件..."
+    sudo tee /etc/apt/sources.list > /dev/null <<EOF
+# 由 VanitySearch 安装脚本 (v${SCRIPT_VERSION}) 临时生成
+# 镜像源: 清华大学 (Tuna)
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-updates main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-backports main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-backports main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
+EOF
+    
+    # 确保 sources.list.d 目录存在
+    sudo mkdir -p /etc/apt/sources.list.d
+
+    log_success "已成功切换到国内镜像源。"
+    
+    # 5. 使用新源进行更新
+    log_info "正在使用新的国内镜像源执行 apt update..."
+    if ! sudo apt-get update; then
+        log_error "'apt update' 在使用国内镜像源时失败。请检查您的网络连接或DNS设置。"
+    fi
+    log_success "APT 更新成功！"
+}
+
 
 # 查找或安装兼容的 g++ 编译器
 find_or_install_compiler() {
@@ -127,19 +145,10 @@ find_or_install_compiler() {
         fi
     done
 
-    log_warn "未找到兼容的 g++ 编译器。脚本将尝试自动安装 ${COMPATIBLE_COMPILERS[0]}。"
-    echo -e -n "${C_YELLOW}您是否同意执行 ${C_BOLD}'sudo apt install ${COMPATIBLE_COMPILERS[0]} -y'${C_RESET}？(Y/n) [将在 15 秒后自动确认]: ${C_RESET}"
-    
-    local user_input=""
-    if read -t 15 user_input; then
-        if [[ "$user_input" =~ ^[Nn]$ ]]; then log_error "用户拒绝自动安装。脚本已中止。"; fi
-    else
-        echo ""; log_info "超时无响应，已默认选择 '是'。"
-    fi
-
+    log_warn "未找到兼容的 g++ 编译器。脚本将自动安装 ${COMPATIBLE_COMPILERS[0]}。"
     log_info "正在执行安装命令..."
-    if ! { sudo apt-get install -y "${COMPATIBLE_COMPILERS[0]}"; }; then
-        log_error "自动安装 ${COMPATIBLE_COMPILERS[0]} 失败。请手动安装后重试。"
+    if ! sudo apt-get install -y "${COMPATIBLE_COMPILERS[0]}"; then
+        log_error "自动安装 ${COMPATIBLE_COMPILERS[0]} 失败。请检查 APT 日志。"
     fi
     log_success "成功安装 ${COMPATIBLE_COMPILERS[0]}。"
     
@@ -150,6 +159,8 @@ find_or_install_compiler() {
 }
 
 
+# (其他辅助函数，如 check_nvidia_cuda, download_source, patch_source_code 等保持不变)
+# ... [此处省略与 v3.2 版本相同的辅助函数代码以保持简洁] ...
 # 检查 NVIDIA 驱动和 CUDA 环境
 check_nvidia_cuda() {
     log_info "正在检查 NVIDIA GPU 环境..."
@@ -174,7 +185,6 @@ check_nvidia_cuda() {
          log_success "找到 CUDA 安装路径: $DETECTED_CUDA_PATH"
     fi
 }
-
 # 下载源代码
 download_source() {
     log_info "正在下载 VanitySearch 源代码..."
@@ -183,19 +193,18 @@ download_source() {
         rm -rf "$PROJECT_DIR"
     fi
 
-    for ((i=1; i<=MAX_RETRIES; i++)); do
+    for ((i=1; i<=3; i++)); do
         if git clone --quiet "$GITHUB_REPO"; then
             log_success "源代码下载成功。"
             cd "$PROJECT_DIR"
             return
         fi
-        log_warn "Git 克隆失败 (尝试 $i/$MAX_RETRIES)。3 秒后重试..."
+        log_warn "Git 克隆失败 (尝试 $i/3)。3 秒后重试..."
         sleep 3
     done
     
-    log_error "尝试 $MAX_RETRIES 次后，克隆仓库失败。"
+    log_error "尝试 3 次后，克隆仓库失败。"
 }
-
 # 应用源代码补丁
 patch_source_code() {
     log_info "正在应用源代码补丁以修复编译错误..."
@@ -218,7 +227,6 @@ patch_source_code() {
         log_success "为 sha256.cpp 添加了字节序反转函数兼容性补丁。"
     fi
 }
-
 # 配置 Makefile
 configure_makefile() {
     log_info "正在根据您的系统环境配置 Makefile..."
@@ -227,7 +235,6 @@ configure_makefile() {
     sed -i "s|^CXXCUDA    = .*|CXXCUDA    = ${DETECTED_CXXCUDA}|" Makefile
     log_success "Makefile 配置已自动完成。"
 }
-
 # 编译
 compile_source() {
     log_info "开始编译... 这可能需要几分钟时间。"
@@ -244,12 +251,12 @@ main() {
     local start_dir; start_dir=$(pwd)
     
     echo -e "${C_BOLD}--- alek76-2/VanitySearch 自动化安装脚本 (v${SCRIPT_VERSION}) ---${C_RESET}"
-    echo -e "此版本会自动诊断并临时修复失效的 APT 软件源。"
+    echo -e "此版本将自动备份并临时替换为${C_YELLOW}国内高速 APT 镜像源${C_RESET}以确保安装成功。"
     echo "----------------------------------------------------"
     sleep 2
 
-    # 步骤 1: APT 源健康检查与修复 (新增的关键步骤)
-    check_and_fix_apt_sources
+    # 步骤 1: 临时替换为国内镜像源 (新增的关键步骤)
+    override_apt_sources
 
     # 步骤 2: 查找或安装兼容的编译器
     find_or_install_compiler
