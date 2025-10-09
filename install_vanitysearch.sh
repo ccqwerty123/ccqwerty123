@@ -71,31 +71,31 @@ require_root_or_sudo
 # Step 1: 修正 APT 源并更新（带回退）
 # =========================
 fix_apt_sources() {
+  # 备份现有 APT 源
   info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
   sudo_run cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
 
-  info "写入官方推荐源（优先 mirror:// 自动选择镜像）..."
+  # 写入国内镜像源（此处以清华大学 TUNA 源为例）
+  info "写入国内镜像源（清华大学 TUNA 源）..."
+  # 使用变量 ${UBUNTU_CODENAME} 来自动匹配你的 Ubuntu 版本 (例如 noble)
   sudo_run bash -c "cat > '${APT_LIST}'" <<EOF
-deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME} main restricted universe multiverse
-deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-deb http://security.ubuntu.com/ubuntu ${UBUNTU_CODENAME}-security main restricted universe multiverse
-# 源码仓可按需开启：
-# deb-src mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME} main restricted universe multiverse
-# deb-src http://security.ubuntu.com/ubuntu ${UBUNTU_CODENAME}-security main restricted universe multiverse
+# 默认注释了源码镜像，以提高 apt update 速度，如有需要可自行取消注释
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
+
+# 安全更新源也使用国内镜像，以解决无法连接官方安全源的问题
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
+  # 更新软件包列表
   info "apt-get update（3 次重试）..."
-  if ! retry 3 sudo_run apt-get update -o Acquire::Retries=3; then
-    warn "mirror:// 更新失败，改用 archive.ubuntu.com 官方主站..."
-    sudo_run bash -c "cat > '${APT_LIST}'" <<'EOF'
-deb http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse
-deb http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
-EOF
-    retry 3 sudo_run apt-get update -o Acquire::Retries=3 || die "apt-get update 仍失败，请检查网络或代理。"
-  fi
+  retry 3 sudo_run apt-get update -o Acquire::Retries=3 || die "apt-get update 失败，请检查网络或更换其他国内源重试。"
+  
   info "APT 源与更新准备就绪。"
 }
 
