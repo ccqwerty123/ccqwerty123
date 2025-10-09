@@ -75,9 +75,8 @@ fix_apt_sources() {
   info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
   sudo_run cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
 
-  # 写入国内镜像源（此处以清华大学 TUNA 源为例）
+  # 写入国内镜像源（清华大学 TUNA 源）
   info "写入国内镜像源（清华大学 TUNA 源）..."
-  # 使用变量 ${UBUNTU_CODENAME} 来自动匹配你的 Ubuntu 版本 (例如 noble)
   sudo_run bash -c "cat > '${APT_LIST}'" <<EOF
 # 默认注释了源码镜像，以提高 apt update 速度，如有需要可自行取消注释
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -86,15 +85,14 @@ deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-
-# 安全更新源也使用国内镜像，以解决无法连接官方安全源的问题
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
-  # 更新软件包列表
+  # 更新软件包列表，增加额外参数提高成功率
   info "apt-get update（3 次重试）..."
-  retry 3 sudo_run apt-get update -o Acquire::Retries=3 || die "apt-get update 失败，请检查网络或更换其他国内源重试。"
+  # -o Acquire::Check-Valid-Until=false  <-- 避免因容器时间不准导致源验证失败
+  retry 3 sudo_run apt-get update -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false || die "apt-get update 失败，请检查网络或更换其他国内源重试。"
   
   info "APT 源与更新准备就绪。"
 }
