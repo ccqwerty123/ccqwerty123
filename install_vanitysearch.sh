@@ -2,40 +2,37 @@
 #
 # alek76-2/VanitySearch 自动化安装与编译脚本 (中文增强版)
 #
-# 版本: 4.0.0-zh
+# 版本: 4.1.0-zh
 #
 # 此脚本专为通过管道执行而设计，例如:
 # curl -sSL [URL] | bash
 #
 # ==============================================================================
-# v4.0.0 更新日志:
-# - 新增: [核心功能] 自动从源码编译和安装旧版本 OpenSSL (1.0.1a) 到 /opt/ 目录，
-#   以解决新版 OpenSSL 导致的私钥计算错误问题。
-# - 新增: [智能判断] 脚本运行时会先检查 VanitySearch 是否已成功安装，
-#   若已存在且可执行，则直接退出，实现重复执行无副作用 (幂等性)。
-# - 新增: [可靠验证] 编译成功后，脚本会自动执行 "./VanitySearch -h" 命令并显示其输出，
-#   以此作为最终的、可靠的成功验证。
-# - 移除: 根据用户要求，移除了 APT 镜像源的备份与恢复逻辑，现在切换镜像源为永久性操作。
-# - 优化: 编译步骤现在会通过 CFLAGS 和 LDFLAGS 明确链接到新安装的旧版 OpenSSL。
+# v4.1.0 更新日志:
+# - 修复: [核心修复] 解决了在现代系统上编译旧版 OpenSSL (1.0.1a) 时，
+#   因默认 gcc 版本过新而导致编译 silently fail (静默失败) 并使脚本中止的问题。
+# - 变更: 在编译 OpenSSL 的步骤中，通过 `export CC=gcc-9` 明确指定使用
+#   兼容的旧版本 C 编译器。
+# - 变更: 安装编译器步骤现在会确保 `gcc-9` 和 `g++-9` 都被安装。
 # ==============================================================================
 #
 # 功能特性:
+# - [v4.1+] 强制使用 gcc-9 编译旧版 OpenSSL，解决兼容性问题。
 # - [v4.0+] 自动编译并链接所需的旧版本 OpenSSL (1.0.1a)。
 # - [v4.0+] 智能检查，避免重复安装。
 # - [v4.0+] 通过运行程序本身来验证安装成功。
 # - [v3.3+] 自动切换为国内高速 APT 镜像源。
-# - [v3.1+] 自动检查并安装缺失的旧版本编译器 (g++-9)。
+# - [v3.1+] 自动检查并安装缺失的旧版本编译器 (g++-9, gcc-9)。
 # - 智能检测 NVIDIA 驱动、CUDA 工具包及 GPU 计算能力。
 # - 自动修复源代码中的 C++ 兼容性错误。
-# - 自动配置 Makefile 文件并编译。
-# - 提供彩色的、详细的中文输出。
 #
 
 # --- 配置信息 ---
-SCRIPT_VERSION="4.0.0-zh"
+SCRIPT_VERSION="4.1.0-zh"
 GITHUB_REPO="https://github.com/alek76-2/VanitySearch.git"
 PROJECT_DIR="VanitySearch"
 COMPATIBLE_COMPILERS=("g++-9" "g++-8" "g++-7")
+COMPATIBLE_C_COMPILER="gcc-9"
 OPENSSL_VERSION="1.0.1a"
 OPENSSL_URL="http://www.openssl.org/source/old/1.0.1/openssl-${OPENSSL_VERSION}.tar.gz"
 OPENSSL_INSTALL_PATH="/opt/openssl-${OPENSSL_VERSION}"
@@ -65,35 +62,26 @@ log_error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
 switch_to_domestic_apt_source() {
     log_info "为了确保安装过程顺利，将永久切换为国内高速镜像源 (清华大学 Tuna 源)。"
     
-    # 获取系统代号
     local codename
     if ! codename=$(. /etc/os-release && echo "$VERSION_CODENAME"); then
         log_error "无法自动检测 Ubuntu 系统代号。脚本无法继续。"
     fi
     log_info "检测到系统代号为: $codename"
     
-    # 创建新的 sources.list 文件
-    log_info "正在生成新的 sources.list 文件..."
     sudo tee /etc/apt/sources.list > /dev/null <<EOF
 # 由 VanitySearch 安装脚本 (v${SCRIPT_VERSION}) 生成
 # 镜像源: 清华大学 (Tuna)
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-updates main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-updates main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-backports main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-backports main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
 EOF
     
-    # 确保 sources.list.d 目录存在且清空
     sudo mkdir -p /etc/apt/sources.list.d
     sudo rm -f /etc/apt/sources.list.d/*
 
     log_success "已成功切换到国内镜像源。"
     
-    # 使用新源进行更新
     log_info "正在使用新的国内镜像源执行 apt update..."
     if ! sudo apt-get update; then
         log_error "'apt update' 在使用国内镜像源时失败。请检查您的网络连接或DNS设置。"
@@ -114,14 +102,16 @@ install_openssl_from_source() {
 
     local build_dir; build_dir=$(mktemp -d)
     
-    # 安装编译依赖
-    log_info "正在安装 OpenSSL 编译依赖 (build-essential, wget)..."
-    sudo apt-get install -y build-essential wget
+    log_info "正在安装 OpenSSL 编译依赖 (wget)..."
+    sudo apt-get install -y wget
     
     log_info "正在从 ${OPENSSL_URL} 下载源码..."
     wget -qO- "$OPENSSL_URL" | tar xz -C "$build_dir"
     
     cd "${build_dir}/openssl-${OPENSSL_VERSION}"
+    
+    log_info "指定使用 ${COMPATIBLE_C_COMPILER} 编译器以确保兼容性..."
+    export CC=$(command -v ${COMPATIBLE_C_COMPILER})
     
     log_info "正在配置 OpenSSL..."
     ./config shared --prefix="$OPENSSL_INSTALL_PATH"
@@ -140,28 +130,32 @@ install_openssl_from_source() {
 }
 
 
-# 查找或安装兼容的 g++ 编译器
+# 查找或安装兼容的 g++/gcc 编译器
 find_or_install_compiler() {
-    log_info "正在查找兼容的 g++ 编译器 (版本 <= 9)..."
-    for compiler in "${COMPATIBLE_COMPILERS[@]}"; do
-        if command -v "$compiler" &>/dev/null; then
-            DETECTED_CXXCUDA=$(command -v "$compiler")
-            log_success "已找到并选定兼容的编译器: ${C_BOLD}$DETECTED_CXXCUDA${C_RESET}"
-            return
-        fi
-    done
-
-    log_warn "未找到兼容的 g++ 编译器。脚本将自动安装 ${COMPATIBLE_COMPILERS[0]}。"
-    log_info "正在执行安装命令..."
-    if ! sudo apt-get install -y "${COMPATIBLE_COMPILERS[0]}"; then
-        log_error "自动安装 ${COMPATIBLE_COMPILERS[0]} 失败。请检查 APT 日志。"
-    fi
-    log_success "成功安装 ${COMPATIBLE_COMPILERS[0]}。"
+    local cpp_compiler_to_install="${COMPATIBLE_COMPILERS[0]}"
+    log_info "正在查找兼容的 C++ 编译器 (${cpp_compiler_to_install}) 和 C 编译器 (${COMPATIBLE_C_COMPILER})..."
     
-    if ! command -v "${COMPATIBLE_COMPILERS[0]}" &>/dev/null; then
-        log_error "安装后依然无法找到 ${COMPATIBLE_COMPILERS[0]} 命令。"
+    local needs_install=false
+    if ! command -v "$cpp_compiler_to_install" &>/dev/null; then
+        log_warn "未找到 C++ 编译器: ${cpp_compiler_to_install}"
+        needs_install=true
     fi
-    DETECTED_CXXCUDA=$(command -v "${COMPATIBLE_COMPILERS[0]}")
+    if ! command -v "$COMPATIBLE_C_COMPILER" &>/dev/null; then
+        log_warn "未找到 C 编译器: ${COMPATIBLE_C_COMPILER}"
+        needs_install=true
+    fi
+
+    if [ "$needs_install" = true ]; then
+        log_info "脚本将自动安装缺失的编译器..."
+        if ! sudo apt-get install -y "$cpp_compiler_to_install" "$COMPATIBLE_C_COMPILER" build-essential; then
+            log_error "自动安装编译器失败。请检查 APT 日志。"
+        fi
+        log_success "成功安装所需的编译器。"
+    else
+        log_success "已找到所有必需的兼容编译器。"
+    fi
+    
+    DETECTED_CXXCUDA=$(command -v "$cpp_compiler_to_install")
 }
 
 # 检查 NVIDIA 驱动和 CUDA 环境
@@ -194,7 +188,7 @@ download_source() {
     log_info "正在下载 VanitySearch 源代码..."
     if [ -d "$PROJECT_DIR" ]; then
         log_warn "目录 '$PROJECT_DIR' 已存在，将删除以进行全新安装。"
-        rm -rf "$PROJECT_DIR"
+        sudo rm -rf "$PROJECT_DIR"
     fi
 
     if ! git clone --quiet "$GITHUB_REPO"; then
@@ -241,13 +235,11 @@ configure_makefile() {
 compile_source() {
     log_info "开始编译 (链接到自定义 OpenSSL)... 这可能需要几分钟时间。"
     
-    # 定义指向旧版本 OpenSSL 的编译和链接标志
     local CFLAGS="-I${OPENSSL_INSTALL_PATH}/include"
     local LDFLAGS="-L${OPENSSL_INSTALL_PATH}/lib -Wl,-rpath,${OPENSSL_INSTALL_PATH}/lib"
 
     make clean > /dev/null 2>&1 || true
     
-    # 在 make 命令中传入这些标志
     if make -j$(nproc) gpu=1 ccap=${DETECTED_CCAP} all CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"; then
         log_success "编译成功完成！"
     else
@@ -264,11 +256,9 @@ validate_installation() {
     
     log_info "执行 './VanitySearch -h' 以确认程序可运行..."
     echo "------------------- VanitySearch 帮助信息 -------------------"
-    # 执行并显示帮助信息
     ./VanitySearch -h
     echo "----------------------------------------------------------"
     
-    # 再次检查退出码
     if [ $? -eq 0 ]; then
         log_success "验证成功！程序可以正常执行。"
     else
@@ -282,8 +272,7 @@ main() {
     
     echo -e "${C_BOLD}--- alek76-2/VanitySearch 自动化安装脚本 (v${SCRIPT_VERSION}) ---${C_RESET}"
     
-    # 步骤 0: 检查是否已安装 (幂等性)
-    if [ -f "${PROJECT_DIR}/VanitySearch" ] && "${start_dir}/${PROJECT_DIR}/VanitySearch" -h > /dev/null 2>&1; then
+    if [ -f "${start_dir}/${PROJECT_DIR}/VanitySearch" ] && "${start_dir}/${PROJECT_DIR}/VanitySearch" -h > /dev/null 2>&1; then
         log_success "VanitySearch 似乎已经成功安装并且可以运行。"
         log_info "可执行文件位于: ${C_BOLD}${start_dir}/${PROJECT_DIR}/VanitySearch${C_RESET}"
         log_info "如需重新安装，请先删除 '${PROJECT_DIR}' 目录后再次运行此脚本。"
@@ -294,31 +283,14 @@ main() {
     echo "----------------------------------------------------"
     sleep 2
 
-    # 步骤 1: 切换为国内镜像源
     switch_to_domestic_apt_source
-
-    # 步骤 2: 安装旧版本 OpenSSL
-    install_openssl_from_source
-
-    # 步骤 3: 查找或安装兼容的编译器
     find_or_install_compiler
-
-    # 步骤 4: 检查 NVIDIA 环境
+    install_openssl_from_source
     check_nvidia_cuda
-
-    # 步骤 5: 下载源代码
     download_source
-
-    # 步骤 6: 应用修复补丁
     patch_source_code
-
-    # 步骤 7: 配置 Makefile
     configure_makefile
-
-    # 步骤 8: 编译
     compile_source
-    
-    # 步骤 9: 验证
     validate_installation
     
     cd "$start_dir"
