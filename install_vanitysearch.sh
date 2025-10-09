@@ -1,120 +1,244 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-#=================================================================================
-# 脚本名称: install_compilers.sh
-# 脚本功能: 为 VanitySearch 项目准备多版本 GCC/G++ 编译环境
-# 适用系统: Ubuntu 及其衍生版 (如 18.04, 20.04)
-#=================================================================================
+# =========================
+# Config & Globals
+# =========================
+REPO_URL="https://github.com/alek76-2/VanitySearch.git"
+INSTALL_DIR="${HOME}/VanitySearch"
+LOG_FILE="${HOME}/vanitysearch_install_$(date +%Y%m%d_%H%M%S).log"
+REQUIRED_PKGS=(build-essential git pkg-config libssl-dev ocl-icd-opencl-dev gcc-12 g++-12)
+UBUNTU_CODENAME="noble"   # Ubuntu 24.04
+APT_LIST="/etc/apt/sources.list"
+CUDA_PATH=""              # will detect
+CUDA_BIN=""               # will detect nvcc
+CCAP_INT=""               # e.g., 75
+CCAP_DOT=""               # e.g., 7.5
 
-# --- 颜色定义，用于美化输出 ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# =========================
+# Helpers
+# =========================
+info()  { echo -e "\033[1;32m[INFO]\033[0m $*" | tee -a "$LOG_FILE"; }
+warn()  { echo -e "\033[1;33m[WARN]\033[0m $*" | tee -a "$LOG_FILE"; }
+err()   { echo -e "\033[1;31m[ERR ]\033[0m $*" | tee -a "$LOG_FILE"; }
+die()   { err "$*"; err "安装未完成，详见日志: $LOG_FILE"; exit 1; }
 
-# --- 函数：检查是否以 root 权限运行 ---
-check_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}错误: 此脚本需要以 root 权限运行。${NC}"
-        echo -e "${YELLOW}请使用 'sudo ./install_compilers.sh' 来执行。${NC}"
-        exit 1
-    fi
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+retry() {
+  local tries=$1; shift
+  local n=1
+  until "$@" >>"$LOG_FILE" 2>&1; do
+    if (( n >= tries )); then return 1; fi
+    warn "命令失败，$n/${tries} 次重试后继续...[$*]"
+    sleep $((2*n))
+    ((n++))
+  done
 }
 
-# --- 函数：设置国内软件源 (清华源) ---
-setup_sources() {
-    echo -e "${BLUE}>>> 步骤 1: 开始设置国内软件源 (清华大学镜像源)...${NC}"
-    
-    # 获取 Ubuntu 版本代号，例如 bionic (18.04), focal (20.04)
-    UBUNTU_CODENAME=$(lsb_release -cs)
-    
-    if [ -z "$UBUNTU_CODENAME" ]; then
-        echo -e "${RED}错误: 无法检测到您的 Ubuntu 版本代号。脚本终止。${NC}"
-        exit 1
+require_root_or_sudo() {
+  if [[ $EUID -ne 0 ]]; then
+    if ! need_cmd sudo; then
+      die "需要 root 或 sudo 权限，请用 sudo 运行该脚本。"
     fi
-    echo -e "${GREEN}检测到您的 Ubuntu 版本代号为: ${UBUNTU_CODENAME}${NC}"
+  fi
+}
 
-    # 备份原始的 sources.list 文件
-    echo "备份当前的 /etc/apt/sources.list 文件为 /etc/apt/sources.list.bak..."
-    mv /etc/apt/sources.list /etc/apt/sources.list.bak
-    
-    # 创建新的 sources.list 文件
-    echo "正在写入新的清华大学镜像源配置..."
-    cat > /etc/apt/sources.list <<EOF
-# 默认注释了源码镜像以提高速度
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
-# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+sudo_run() {
+  if [[ $EUID -ne 0 ]]; then sudo "$@"; else "$@"; fi
+}
+
+# =========================
+# Step 0: 环境与日志准备
+# =========================
+info "日志文件: $LOG_FILE"
+info "检查系统为 Ubuntu 24.04（noble）..."
+if ! need_cmd lsb_release; then
+  sudo_run apt-get update -o Acquire::Retries=3 >>"$LOG_FILE" 2>&1 || true
+  sudo_run apt-get install -y lsb-release >>"$LOG_FILE" 2>&1 || true
+fi
+DISTRO=$(lsb_release -is 2>/dev/null || echo "Ubuntu")
+CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
+RELEASE=$(lsb_release -rs 2>/dev/null || echo "")
+info "检测到: ${DISTRO} ${RELEASE} (${CODENAME})"
+if [[ "${DISTRO}" != "Ubuntu" ]]; then
+  die "非 Ubuntu 系统，脚本仅适配 Ubuntu 24.04（noble）。"
+fi
+
+require_root_or_sudo
+
+# =========================
+# Step 1: 修正 APT 源并更新（带回退）
+# =========================
+fix_apt_sources() {
+  info "备份现有 APT 源到 ${APT_LIST}.bak.$(date +%s)"
+  sudo_run cp -a "${APT_LIST}" "${APT_LIST}.bak.$(date +%s)" || true
+
+  info "写入官方推荐源（优先 mirror:// 自动选择镜像）..."
+  sudo_run bash -c "cat > '${APT_LIST}'" <<EOF
+deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME} main restricted universe multiverse
+deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+deb mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME}-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu ${UBUNTU_CODENAME}-security main restricted universe multiverse
+# 源码仓可按需开启：
+# deb-src mirror://mirrors.ubuntu.com/mirrors.txt ${UBUNTU_CODENAME} main restricted universe multiverse
+# deb-src http://security.ubuntu.com/ubuntu ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
-    echo -e "${GREEN}软件源配置成功！正在更新软件包列表...${NC}"
-    apt-get update
-    echo -e "${GREEN}软件包列表更新完成。${NC}"
+  info "apt-get update（3 次重试）..."
+  if ! retry 3 sudo_run apt-get update -o Acquire::Retries=3; then
+    warn "mirror:// 更新失败，改用 archive.ubuntu.com 官方主站..."
+    sudo_run bash -c "cat > '${APT_LIST}'" <<'EOF'
+deb http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+EOF
+    retry 3 sudo_run apt-get update -o Acquire::Retries=3 || die "apt-get update 仍失败，请检查网络或代理。"
+  fi
+  info "APT 源与更新准备就绪。"
 }
 
-# --- 函数：安装多版本编译器 ---
-install_compilers() {
-    echo -e "\n${BLUE}>>> 步骤 2: 开始安装多版本 GCC/G++ 编译器...${NC}"
+fix_apt_sources
 
-    # 安装 'software-properties-common' 以便使用 'add-apt-repository'
-    echo "安装 'software-properties-common'..."
-    apt-get install -y software-properties-common
-    
-    # 添加 ubuntu-toolchain-r/test PPA，这是获取不同版本GCC的主要来源
-    echo "添加 PPA: 'ppa:ubuntu-toolchain-r/test'..."
-    add-apt-repository ppa:ubuntu-toolchain-r/test -y
-    
-    echo "再次更新软件包列表..."
-    apt-get update
+# =========================
+# Step 2: 安装所需依赖
+# =========================
+info "安装依赖：${REQUIRED_PKGS[*]}"
+retry 3 sudo_run apt-get install -y "${REQUIRED_PKGS[@]}" || die "依赖安装失败。"
 
-    # --- 尝试安装 GCC/G++ 7 ---
-    echo -e "\n${YELLOW}--- 正在尝试安装 gcc-7 和 g++-7... ---${NC}"
-    apt-get install -y gcc-7 g++-7
-    
-    # 检查 g++-7 是否安装成功
-    if command -v g++-7 &> /dev/null; then
-        echo -e "${GREEN}成功: g++-7 已成功安装！${NC}"
-        g++-7 --version | head -n 1
-    else
-        echo -e "${RED}失败: 未能成功安装 g++-7。请检查上面的错误信息。${NC}"
+# =========================
+# Step 3: 检测 CUDA 与 nvcc
+# =========================
+detect_cuda() {
+  if need_cmd nvcc; then
+    CUDA_BIN=$(command -v nvcc)
+    CUDA_PATH=$(dirname "$(dirname "$CUDA_BIN")")
+  else
+    # 常见默认路径回退
+    for c in /usr/local/cuda /usr/local/cuda-12.0 /usr/local/cuda-12 /usr/local/cuda-11.8; do
+      if [[ -x "$c/bin/nvcc" ]]; then CUDA_PATH="$c"; CUDA_BIN="$c/bin/nvcc"; break; fi
+    done
+  fi
+
+  if [[ -z "${CUDA_BIN}" || ! -x "${CUDA_BIN}" ]]; then
+    die "未检测到 nvcc（CUDA 编译器）。请确认已正确安装 CUDA Toolkit 12.0 并将 nvcc 加入 PATH。"
+  fi
+
+  info "检测到 CUDA: ${CUDA_PATH}, nvcc: ${CUDA_BIN}"
+  export PATH="${CUDA_PATH}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}"
+}
+detect_cuda
+
+# =========================
+# Step 4: 检测 GPU 计算能力（ccap）
+# =========================
+detect_ccap() {
+  local cap=""
+  if need_cmd nvidia-smi; then
+    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 || true)
+  fi
+  if [[ -z "$cap" ]]; then
+    # 回退：通过名字猜测（你的机器是 Tesla T4）
+    local name=""
+    if need_cmd nvidia-smi; then
+      name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || true)
     fi
-
-    # --- 尝试安装 GCC/G++ 4.8 ---
-    # 注意: 在较新的 Ubuntu 系统 (如 20.04+) 上，这步有很大概率会失败
-    echo -e "\n${YELLOW}--- 正在尝试安装 gcc-4.8 和 g++-4.8... ---${NC}"
-    echo -e "${YELLOW}注意: 在新的 Ubuntu 系统上，这步很可能会失败。如果失败是正常的。${NC}"
-    apt-get install -y gcc-4.8 g++-4.8
-    
-    # 检查 g++-4.8 是否安装成功
-    if command -v g++-4.8 &> /dev/null; then
-        echo -e "${GREEN}成功: g++-4.8 已成功安装！${NC}"
-        g++-4.8 --version | head -n 1
+    if echo "$name" | grep -qi "T4"; then
+      cap="7.5"
     else
-        echo -e "${RED}失败: 未能成功安装 g++-4.8。这在较新的系统上是预期行为。${NC}"
-        echo -e "${YELLOW}如果编译 CUDA 需要旧版编译器，您可能需要使用 Docker 等容器化技术来创建一个旧版系统环境。${NC}"
+      warn "无法从 nvidia-smi 读取 compute capability，默认使用 7.5（T4）。"
+      cap="7.5"
     fi
+  fi
+  CCAP_DOT="$cap"
+  CCAP_INT="$(echo "$cap" | tr -d '.')"
+  info "GPU 计算能力: ${CCAP_DOT}（传参 CCAP=${CCAP_DOT} / ccap=${CCAP_INT}）"
 }
+detect_ccap
 
-
-# --- 主程序逻辑 ---
-main() {
-    check_root
-    setup_sources
-    install_compilers
-
-    echo -e "\n\n${BLUE}===================== 脚本执行完毕 =====================${NC}"
-    echo -e "请检查上面的输出确认编译器安装情况。"
-    echo -e "您现在可以通过版本号直接调用它们，例如：\n  ${GREEN}g++-7 -v${NC}\n  ${GREEN}g++-4.8 -v${NC} (如果安装成功的话)"
-    echo -e "\n下一步是修改 VanitySearch 的 Makefile 文件，将 CXXCUDA 指向您需要的旧版本编译器路径，例如 /usr/bin/g++-4.8。"
-    echo -e "${YELLOW}如果 g++-4.8 安装失败，您将无法继续编译需要旧版编译器的 CUDA 部分。${NC}"
-    echo -e "${BLUE}========================================================${NC}"
+# =========================
+# Step 5: 获取源码（alek76-2/VanitySearch）
+# =========================
+fetch_source() {
+  if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    info "检测到已有仓库：${INSTALL_DIR}，执行 git pull..."
+    (cd "${INSTALL_DIR}" && git fetch --all >>"$LOG_FILE" 2>&1 && git reset --hard origin/master >>"$LOG_FILE" 2>&1) || die "git 更新失败。"
+  else
+    info "克隆仓库到 ${INSTALL_DIR}..."
+    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}" >>"$LOG_FILE" 2>&1 || die "git clone 失败。"
+  fi
 }
+fetch_source
 
-# --- 运行主程序 ---
-main
+# =========================
+# Step 6: 构建（先 CPU，后 GPU）
+# =========================
+build_project() {
+  local jobs
+  jobs=$(nproc || echo 2)
+
+  info "开始构建 CPU 版..."
+  ( cd "${INSTALL_DIR}" && make clean >>"$LOG_FILE" 2>&1 || true
+    if ! make -j"${jobs}" >>"$LOG_FILE" 2>&1; then
+      die "CPU 版构建失败，请查看日志：${LOG_FILE}"
+    fi
+  )
+  info "CPU 版构建完成。"
+
+  # 尝试 GPU 版
+  info "开始构建 GPU 版（nvcc 用 g++-12 作为宿主编译器）..."
+  local cuda_arg="CUDA=${CUDA_PATH}"
+  local cxxcuda_arg="CXXCUDA=/usr/bin/g++-12"
+  local gpu_args=(gpu=1 all)
+  # 同时传递两种 ccap 写法，兼容不同 Makefile 风格
+  ( cd "${INSTALL_DIR}" && \
+    if ! make -j"${jobs}" ${cuda_arg} ${cxxcuda_arg} ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" "${gpu_args[@]}" >>"$LOG_FILE" 2>&1; then
+      # 如果失败，尝试显式导出 PATH/LD_LIBRARY_PATH 后再来一次（处理环境变量问题）
+      export PATH="${CUDA_PATH}/bin:${PATH}"
+      export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}"
+      warn "首次 GPU 构建失败，尝试在显式 CUDA 环境下重试..."
+      make clean >>"$LOG_FILE" 2>&1 || true
+      make -j"${jobs}" ${cuda_arg} ${cxxcuda_arg} ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" "${gpu_args[@]}" >>"$LOG_FILE" 2>&1 || die "GPU 版构建失败，请查看日志：${LOG_FILE}"
+    fi
+  )
+  info "GPU 版构建完成。"
+}
+build_project
+
+# =========================
+# Step 7: 生成环境文件与自检
+# =========================
+post_setup() {
+  info "写入环境变量到 ${INSTALL_DIR}/env.sh"
+  cat > "${INSTALL_DIR}/env.sh" <<EOF
+# 加载 CUDA 运行库路径与可执行文件路径
+export PATH="${CUDA_PATH}/bin:\$PATH"
+export LD_LIBRARY_PATH="${CUDA_PATH}/lib64:\${LD_LIBRARY_PATH:-}"
+EOF
+
+  chmod +x "${INSTALL_DIR}/env.sh"
+
+  info "自检：显示帮助与列出 CUDA 设备..."
+  ( cd "${INSTALL_DIR}"
+    source ./env.sh
+    ./VanitySearch -h >/dev/null 2>&1 || warn "VanitySearch -h 返回非 0，但可能仅为帮助退出码。"
+    if ./VanitySearch -l >/dev/null 2>&1; then
+      info "已成功列出 CUDA 设备。"
+    else
+      warn "无法列出 CUDA 设备（./VanitySearch -l）。GPU 仍可能需要检查驱动/CUDA 环境。"
+    fi
+  )
+}
+post_setup
+
+info "全部完成！"
+echo
+echo "接下来可按如下方式使用（示例）："
+echo "  cd '${INSTALL_DIR}'"
+echo "  source ./env.sh"
+echo "  ./VanitySearch -l              # 列出 CUDA 设备"
+echo "  ./VanitySearch -gpu -t 1 1YourPrefixHere"
+echo
+echo "若构建失败，请查看日志：${LOG_FILE}"
