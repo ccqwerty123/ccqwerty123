@@ -342,7 +342,12 @@ main() {
     if [ "$need_reinstall" = true ]; then
         [ -d "BitCrack" ] && rm -rf BitCrack
         echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
-        git clone https://github.com/brichard19/BitCrack.git
+        # --- 修改开始 ---
+        # 原本的地址，注释掉备用
+        # git clone https://github.com/brichard19/BitCrack.git
+        # 使用修改版的地址，并确保克隆到名为 "BitCrack" 的文件夹
+        git clone https://github.com/djmuratb/BitCrack2.git BitCrack
+        # --- 修改结束 ---
         
         # 编译 embedcl 工具
         if ! build_embedcl "BitCrack"; then
