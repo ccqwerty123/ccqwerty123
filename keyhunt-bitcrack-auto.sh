@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
-# 版本: 1.7.0 - 支持 djarumlights/BitCrack 分支
+# 版本: 1.6.0 - 修复 BitCrack embedcl 编译问题
 #
 # 特性:
 # 1.  APT 源自动修复: 脚本启动时自动切换到国内清华源，并解决常见的锁问题。
@@ -11,22 +11,10 @@
 # 5.  COMPUTE_CAP 检查: 自动检查并更新 BitCrack Makefile 中的 COMPUTE_CAP 值。
 # 6.  embedcl 修复: 确保 embedcl 工具正确编译和运行。
 # 7.  最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
-# 8.  支持 djarumlights/BitCrack: 默认使用改进版本，可切换到原版。
 #
 
 # --- 脚本版本 ---
-SCRIPT_VERSION="1.7.0 - 支持 djarumlights/BitCrack 分支"
-
-# --- BitCrack 版本选择 ---
-# 设置为 "alt" 使用 frstrtr 改进版（main_alt.cpp）
-# 设置为 "original" 使用原版（main.cpp）
-BITCRACK_VERSION="alt"  # 默认使用新版本
-
-# --- BitCrack 仓库选择 ---
-# 使用 djarumlights 的改进分支
-BITCRACK_REPO="https://github.com/djarumlights/BitCrack.git"
-# 如果要使用原始仓库，可以改为：
-# BITCRACK_REPO="https://github.com/brichard19/BitCrack.git"
+SCRIPT_VERSION="1.6.0 - 修复 BitCrack embedcl 编译问题"
 
 # --- Bash 颜色代码 ---
 GREEN='\033[0;32m'
@@ -145,54 +133,6 @@ detect_compute_capability() {
         exit 1
     fi
     echo "$COMPUTE_CAP"
-}
-
-# --- 函数：处理 AddrGen 中的 main 文件冲突 ---
-handle_addrgen_main_files() {
-    local bitcrack_dir="$1"
-    local version="$2"
-    
-    echo -e "${YELLOW}---> 处理 AddrGen 中的 main 文件...${NC}"
-    
-    if [ ! -d "${bitcrack_dir}/AddrGen" ]; then
-        echo -e "${YELLOW}警告: AddrGen 目录不存在，跳过处理${NC}"
-        return 0
-    fi
-    
-    cd "${bitcrack_dir}/AddrGen"
-    
-    # 根据选择的版本处理文件
-    if [ "$version" = "alt" ]; then
-        echo -e "${CYAN}使用 frstrtr 改进版本 (main_alt.cpp)${NC}"
-        if [ -f "main_alt.cpp" ]; then
-            # 备份原始 main.cpp
-            if [ -f "main.cpp" ]; then
-                mv main.cpp main_original.cpp.bak 2>/dev/null || true
-            fi
-            # 使用 main_alt.cpp 作为 main.cpp
-            cp main_alt.cpp main.cpp
-            echo -e "${GREEN}已切换到改进版本${NC}"
-        else
-            echo -e "${YELLOW}警告: main_alt.cpp 不存在，使用原版${NC}"
-        fi
-    else
-        echo -e "${CYAN}使用原始版本 (main.cpp)${NC}"
-        # 如果有备份的原版，恢复它
-        if [ -f "main_original.cpp.bak" ]; then
-            mv main_original.cpp.bak main.cpp
-            echo -e "${GREEN}已恢复原始版本${NC}"
-        fi
-    fi
-    
-    # 修改 Makefile，确保只编译 main.cpp
-    if [ -f "Makefile" ]; then
-        # 修改 Makefile 中的编译命令，移除 main_alt.cpp
-        sed -i 's/main_alt\.cpp main\.cpp/main.cpp/g' Makefile
-        sed -i 's/main\.cpp main_alt\.cpp/main.cpp/g' Makefile
-    fi
-    
-    cd ../..
-    return 0
 }
 
 # --- 函数：编译 BitCrack 的 embedcl 工具 ---
@@ -315,9 +255,6 @@ check_and_update_compute_cap() {
         # 完整重新编译
         cd "$bitcrack_dir"
         
-        # 处理 AddrGen 中的文件冲突
-        handle_addrgen_main_files "." "$BITCRACK_VERSION"
-        
         # 先编译 embedcl
         build_embedcl "."
         
@@ -336,9 +273,6 @@ check_and_update_compute_cap() {
 main() {
     echo -e "${CYAN}=====================================================${NC}"
     echo -e "${CYAN}  运行安装脚本 ${SCRIPT_VERSION}               ${NC}"
-    echo -e "${CYAN}=====================================================${NC}"
-    echo -e "${CYAN}  BitCrack 仓库: ${BITCRACK_REPO}${NC}"
-    echo -e "${CYAN}  BitCrack 版本: ${BITCRACK_VERSION} (alt=改进版, original=原版)${NC}"
     echo -e "${CYAN}=====================================================${NC}"
 
     # 0. 自动修复并更新 APT 源
@@ -407,31 +341,25 @@ main() {
     # 如果需要全新安装
     if [ "$need_reinstall" = true ]; then
         [ -d "BitCrack" ] && rm -rf BitCrack
-        echo -e "${YELLOW}---> 正在克隆 BitCrack 项目 (${BITCRACK_REPO})...${NC}"
-        git clone "${BITCRACK_REPO}"
+        echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
+        git clone https://github.com/brichard19/BitCrack.git
         
-        # 处理 AddrGen 中的文件冲突
-        if ! handle_addrgen_main_files "BitCrack" "$BITCRACK_VERSION"; then
-            echo -e "${RED}---> 处理 AddrGen 文件失败！${NC}"
+        # 编译 embedcl 工具
+        if ! build_embedcl "BitCrack"; then
+            echo -e "${RED}---> embedcl 工具编译失败！${NC}"
             BITCRACK_SUCCESS=false
         else
-            # 编译 embedcl 工具
-            if ! build_embedcl "BitCrack"; then
-                echo -e "${RED}---> embedcl 工具编译失败！${NC}"
+            # 处理 OpenCL 内核文件
+            if ! process_opencl_kernels "BitCrack"; then
+                echo -e "${RED}---> OpenCL 内核处理失败！${NC}"
                 BITCRACK_SUCCESS=false
             else
-                # 处理 OpenCL 内核文件
-                if ! process_opencl_kernels "BitCrack"; then
-                    echo -e "${RED}---> OpenCL 内核处理失败！${NC}"
+                # 编译 BitCrack
+                if ! compile_bitcrack "BitCrack" "$DETECTED_CAP"; then
+                    echo -e "${RED}---> BitCrack 编译失败！${NC}"
                     BITCRACK_SUCCESS=false
                 else
-                    # 编译 BitCrack
-                    if ! compile_bitcrack "BitCrack" "$DETECTED_CAP"; then
-                        echo -e "${RED}---> BitCrack 编译失败！${NC}"
-                        BITCRACK_SUCCESS=false
-                    else
-                        echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
-                    fi
+                    echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
                 fi
             fi
         fi
@@ -473,8 +401,6 @@ main() {
 
     if [ "$BITCRACK_SUCCESS" = true ]; then
         echo -e "  [ ${GREEN}成功${NC} ] BitCrack (GPU) - COMPUTE_CAP: ${DETECTED_CAP}"
-        echo -e "          仓库: ${BITCRACK_REPO}"
-        echo -e "          版本: ${BITCRACK_VERSION} (alt=改进版, original=原版)"
         if [ -f "BitCrack/bin/cuBitCrack" ]; then
             echo -e "          CUDA 路径: $(pwd)/BitCrack/bin/cuBitCrack"
         fi
