@@ -342,7 +342,7 @@ main() {
     if [ "$need_reinstall" = true ]; then
         [ -d "BitCrack" ] && rm -rf BitCrack
         echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
-        git clone https://github.com/brichard19/BitCrack.git
+        git clone https://github.com/djmuratb/BitCrack2.git
         
         # 编译 embedcl 工具
         if ! build_embedcl "BitCrack"; then
