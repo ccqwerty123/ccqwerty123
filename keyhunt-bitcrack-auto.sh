@@ -100,10 +100,17 @@ fix_apt_sources() {
   
   bash -c "cat > /etc/apt/sources.list" <<EOF
 # 由安装脚本于 $(date) 生成 (v${version})
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+# 腾讯云源 (Tencent Cloud Mirror)
+deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
+deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
+deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+
+# 清华大学 TUNA 源 (Tsinghua University TUNA Mirror) - 已注释
+#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
+#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
+#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
   # 6. 更新软件包列表
