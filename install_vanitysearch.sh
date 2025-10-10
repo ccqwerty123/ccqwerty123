@@ -1,31 +1,35 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-REPO_URL="https://github.com/alek76-2/VanitySearch.git"
-INSTALL_DIR="${HOME}/VanitySearch"
-LOG_FILE="${HOME}/vanitysearch_install_$(date +%Y%m%d_%H%M%S).log"
-REQUIRED_PKGS=(build-essential git pkg-config libssl-dev ocl-icd-opencl-dev gcc-12 g++-12)
-UBUNTU_CODENAME="noble"
-APT_LIST="/etc/apt/sources.list"
-
-# 可选：手动覆盖计算能力，例如 7.5 / 8.6
-FORCE_CCAP="${FORCE_CCAP:-}"
-
-info()  { echo -e "\033[1;32m[INFO]\033[0m $*" | tee -a "$LOG_FILE"; }
-warn()  { echo -e "\033[1;33m[WARN]\033[0m $*" | tee -a "$LOG_FILE"; }
-err()   { echo -e "\033[1;31m[ERR ]\033[0m $*" | tee -a "$LOG_FILE"; }
-die()   { err "$*"; err "安装未完成，日志: $LOG_FILE"; exit 1; }
-need_cmd(){ command -v "$1" >/dev/null 2>&1; }
-retry(){ local t=$1; shift; local n=1; until "$@" >>"$LOG_FILE" 2>&1; do
-  if (( n>=t )); then return 1; fi; warn "第 $n/$t 次失败，重试：$*"; sleep $((2*n)); ((n++)); done; }
-require_root_or_sudo(){ if [[ $EUID -ne 0 ]] && ! need_cmd sudo; then die "需要 root 或 sudo 权限"; fi; }
-sudo_run(){ if [[ $EUID -ne 0 ]]; then sudo "$@"; else "$@"; fi; }
-
-info "日志: $LOG_FILE"
-require_root_or_sudo
-
-# 1) 修正 apt 源并更新（带回退）
+#!/bin/bash
 #
+# KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
+# 版本: 1.5.0 - 集成 APT 源自动修复功能
+#
+# 特性:
+# 1.  APT 源自动修复: 脚本启动时自动切换到国内清华源，并解决常见的锁问题。
+# 2.  版本控制: 启动时显示版本号。
+# 3.  幂等性: 重复运行会跳过已完成的安装。
+# 4.  智能验证: 通过捕获帮助命令的输出来判断是否成功，并显示输出。
+# 5.  COMPUTE_CAP 检查: 自动检查并更新 BitCrack Makefile 中的 COMPUTE_CAP 值。
+# 6.  最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
+#
+
+# --- 脚本版本 ---
+SCRIPT_VERSION="1.5.0 - 集成 APT 源自动修复功能"
+
+# --- Bash 颜色代码 ---
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# --- 脚本在遇到任何错误时立即停止执行 ---
+set -e
+
+# --- 用于最终总结的状态变量 ---
+KEYHUNT_SUCCESS=false
+BITCRACK_SUCCESS=false
+
+# --- 函数：自动修复并更新 APT 源 ---
 # 自动修复并更新 APT 源的函数 (v5.1 - 修复 grep + set -e 导致的脚本中止问题)
 #
 fix_apt_sources() {
@@ -89,6 +93,16 @@ fix_apt_sources() {
 
   # 5. 写入纯净的国内源
   echo "[INFO] 写入纯净的国内源（清华大学 TUNA 源）..."
+  
+  # 获取 Ubuntu 系统代号
+  local UBUNTU_CODENAME
+  UBUNTU_CODENAME=$(lsb_release -cs)
+  if [ -z "$UBUNTU_CODENAME" ]; then
+      echo -e "${RED}错误: 无法确定 Ubuntu 版本代号。${NC}" >&2
+      exit 1
+  fi
+  echo "[INFO] 检测到 Ubuntu 版本代号: ${UBUNTU_CODENAME}"
+  
   bash -c "cat > /etc/apt/sources.list" <<EOF
 # 由安装脚本于 $(date) 生成 (v${version})
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -105,144 +119,200 @@ EOF
 }
 
 
-
-fix_apt_sources
-
-# 2) 依赖
-info "安装依赖：${REQUIRED_PKGS[*]}"
-retry 3 sudo_run apt-get install -y "${REQUIRED_PKGS[@]}" || die "依赖安装失败"
-
-# 3) 检测 nvcc 与 CUDA 根
-CUDA_BIN=""
-CUDA_PATH=""
-detect_cuda(){
-  if ! need_cmd nvcc; then die "未找到 nvcc，请先安装 CUDA Toolkit（与你系统匹配即可，当前驱动支持 CUDA 13，nvcc 12.0 也能用）"; fi
-  CUDA_BIN="$(command -v nvcc)"
-  local realbin; realbin="$(readlink -f "$CUDA_BIN" || echo "$CUDA_BIN")"
-  CUDA_PATH="$(dirname "$(dirname "$realbin")")"
-  # 对 Debian/Ubuntu 打包的 cuda-toolkit，nvcc 在 /usr/bin，CUDA_PATH 可能解析为 /usr
-  info "nvcc: ${CUDA_BIN}"
-  info "推测 CUDA 根目录: ${CUDA_PATH}"
-  export PATH="${CUDA_PATH}/bin:${PATH}"
-  # 运行时库多数在 /usr/lib/x86_64-linux-gnu，保留 LD_LIBRARY_PATH 为默认
-}
-detect_cuda
-
-# 4) 读取计算能力（优先用户覆盖；否则 nvidia-smi；再退回 T4=7.5）
-CCAP_DOT=""
-CCAP_INT=""
-detect_ccap(){
-  if [[ -n "$FORCE_CCAP" ]]; then
-    [[ "$FORCE_CCAP" =~ ^[0-9]+\.[0-9]+$ ]] || die "FORCE_CCAP 格式应为如 7.5/8.6"
-    CCAP_DOT="$FORCE_CCAP"; CCAP_INT="$(echo "$FORCE_CCAP" | tr -d '.')"
-    info "使用用户指定 CCAP=${CCAP_DOT}"
-    return
-  fi
-  local cap=""
-  if need_cmd nvidia-smi; then
-    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
-  fi
-  if [[ -z "$cap" || ! "$cap" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    warn "无法从 nvidia-smi 读取有效 compute capability，按 Tesla T4 设定 7.5（可用 FORCE_CCAP 覆盖）"
-    cap="7.5"
-  fi
-  CCAP_DOT="$cap"; CCAP_INT="$(echo "$cap" | tr -d '.')"
-  info "GPU 计算能力：${CCAP_DOT}（传参 ccap=${CCAP_INT} / CCAP=${CCAP_DOT}）"
-}
-detect_ccap
-
-# 5) 获取源码
-fetch_source(){
-  if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    info "更新仓库 ${INSTALL_DIR}"
-    (cd "${INSTALL_DIR}" && git fetch --all >>"$LOG_FILE" 2>&1 && git reset --hard origin/master >>"$LOG_FILE" 2>&1) || die "git 更新失败"
-  else
-    info "克隆仓库到 ${INSTALL_DIR}"
-    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}" >>"$LOG_FILE" 2>&1 || die "git clone 失败"
-  fi
-}
-fetch_source
-
-# 6) 源码补丁：为缺少 <stdint.h> 的头自动补齐；同时强制编译时 -include stdint.h
-patch_sources(){
-  info "应用源码补丁（自动补 <stdint.h>）"
-  # 针对常见包含 uint8_t 的头
-  local heads=( "hash/sha256.h" "hash/sha256_sse.h" "hash/ripemd160.h" )
-  for h in "${heads[@]}"; do
-    local p="${INSTALL_DIR}/${h}"
-    if [[ -f "$p" ]]; then
-      if ! grep -Eq '^(#include\s*<cstdint>|#include\s*<stdint.h>)' "$p"; then
-        sed -i '1i #include <stdint.h>' "$p"
-        echo "[PATCH] add <stdint.h> -> $h" >>"$LOG_FILE"
-      fi
+# --- 函数：检测 NVIDIA GPU 的计算能力 ---
+detect_compute_capability() {
+    if ! command -v nvidia-smi &> /dev/null; then
+        echo -e "${RED}错误: 未找到 'nvidia-smi' 命令。请确保 NVIDIA 驱动已正确安装。${NC}" >&2
+        exit 1
     fi
-  done
-}
-patch_sources
-
-# 7) 构建 CPU
-build_cpu(){
-  info "开始构建 CPU 版..."
-  local jobs; jobs=$(nproc || echo 2)
-  ( cd "${INSTALL_DIR}" && make clean >>"$LOG_FILE" 2>&1 || true
-    # 强制标准并全局预包含 stdint.h，兼容 gcc-13
-    if ! make -j"${jobs}" CXXFLAGS+=' -std=gnu++14 -include stdint.h ' CFLAGS+=' -std=gnu11 -include stdint.h ' >>"$LOG_FILE" 2>&1; then
-      err "CPU 版首次构建失败，添加 -fcommon 重试..."
-      make clean >>"$LOG_FILE" 2>&1 || true
-      make -j"${jobs}" CXXFLAGS+=' -std=gnu++14 -include stdint.h -fcommon ' CFLAGS+=' -std=gnu11 -include stdint.h -fcommon ' >>"$LOG_FILE" 2>&1 || die "CPU 版构建失败，请查日志"
+    local COMPUTE_CAP
+    COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | head -n 1 | tr -d '.')
+    if [ -z "$COMPUTE_CAP" ]; then
+        echo -e "${RED}错误: 无法确定 GPU 计算能力。${NC}" >&2
+        exit 1
     fi
-  )
-  info "CPU 版构建完成。"
+    echo "$COMPUTE_CAP"
 }
-build_cpu
 
-# 8) 构建 GPU（nvcc 指定 g++-12；传 cc 与 NVCCFLAGS）
-build_gpu(){
-  # 能用 nvidia-smi 即可尝试 GPU 构建；不强制要求 /dev/nvidia*（某些容器只做编译）
-  if ! need_cmd nvcc; then warn "无 nvcc，跳过 GPU 构建"; return; fi
-  info "开始构建 GPU 版（CXXCUDA=g++-12, CCAP=${CCAP_DOT}/${CCAP_INT}）..."
-  local jobs; jobs=$(nproc || echo 2)
-  ( cd "${INSTALL_DIR}" && make clean >>"$LOG_FILE" 2>&1 || true
-    if ! make -j"${jobs}" \
-        CUDA="${CUDA_PATH}" CXXCUDA="/usr/bin/g++-12" \
-        NVCCFLAGS+=' --std=c++14 ' \
-        ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" gpu=1 all >>"$LOG_FILE" 2>&1; then
-      err "GPU 版首次构建失败，显式导出 PATH 后重试..."
-      export PATH="${CUDA_PATH}/bin:${PATH}"
-      make clean >>"$LOG_FILE" 2>&1 || true
-      make -j"${jobs}" \
-        CUDA="${CUDA_PATH}" CXXCUDA="/usr/bin/g++-12" \
-        NVCCFLAGS+=' --std=c++14 ' \
-        ccap="${CCAP_INT}" CCAP="${CCAP_DOT}" gpu=1 all >>"$LOG_FILE" 2>&1 || {
-          warn "GPU 版仍失败。可能是该 fork 的 Makefile 与本机 CUDA 组合不兼容，先使用 CPU 版；我可以根据日志再做定向补丁。"
-          return 0; }
+# --- 函数：检查并更新 BitCrack Makefile 中的 COMPUTE_CAP ---
+check_and_update_compute_cap() {
+    local current_cap="$1"
+    local bitcrack_dir="BitCrack"
+    local makefile_path="${bitcrack_dir}/Makefile"
+    
+    echo -e "${YELLOW}---> 正在检查 BitCrack Makefile 中的 COMPUTE_CAP 设置...${NC}"
+    
+    if [ ! -f "$makefile_path" ]; then
+        echo -e "${YELLOW}---> Makefile 不存在，需要重新克隆项目。${NC}"
+        return 1  # 需要重新安装
     fi
-  )
-  info "GPU 版构建完成。"
+    
+    # 从 Makefile 中提取 COMPUTE_CAP 值
+    local makefile_cap
+    makefile_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' "$makefile_path" 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//' || true)
+    
+    echo -e "Makefile 中的 COMPUTE_CAP=${makefile_cap:-<none>}"
+    echo -e "当前 GPU 的 COMPUTE_CAP=${current_cap}"
+    
+    if [ "$makefile_cap" = "$current_cap" ]; then
+        echo -e "${GREEN}---> COMPUTE_CAP 值正确，无需更新。${NC}"
+        return 0  # 不需要重新编译
+    else
+        echo -e "${YELLOW}---> COMPUTE_CAP 值不匹配，需要更新并重新编译。${NC}"
+        
+        # 更新 Makefile 中的 COMPUTE_CAP
+        echo -e "${YELLOW}---> 正在更新 Makefile 中的 COMPUTE_CAP 为 ${current_cap}...${NC}"
+        cd "$bitcrack_dir"
+        sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${current_cap}/" Makefile
+        
+        # 验证更新是否成功
+        local updated_cap
+        updated_cap=$(grep -m1 '^[[:space:]]*COMPUTE_CAP[[:space:]]*=' Makefile 2>/dev/null | sed -E 's/^[[:space:]]*COMPUTE_CAP[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' | sed 's/#.*//' || true)
+        
+        if [ "$updated_cap" = "$current_cap" ]; then
+            echo -e "${GREEN}---> Makefile 更新成功！${NC}"
+        else
+            echo -e "${RED}---> Makefile 更新失败！${NC}"
+            cd ..
+            return 1
+        fi
+        
+        # 清理并重新编译
+        echo -e "${YELLOW}---> 正在清理之前的编译文件...${NC}"
+        make clean || true
+        
+        echo -e "${YELLOW}---> 正在重新编译 BitCrack...${NC}"
+        make -j$(nproc) BUILD_CUDA=1
+        
+        cd ..
+        echo -e "${GREEN}---> BitCrack 重新编译完成！${NC}"
+        return 0
+    fi
 }
-build_gpu
 
-# 9) 环境文件与自检
-post_setup(){
-  info "写入 ${INSTALL_DIR}/env.sh"
-  cat > "${INSTALL_DIR}/env.sh" <<EOF
-# VanitySearch 环境变量
-export PATH="${CUDA_PATH}/bin:\$PATH"
-# Ubuntu 的 CUDA 库通常在 /usr/lib/x86_64-linux-gnu，无需额外 LD_LIBRARY_PATH
-EOF
-  chmod +x "${INSTALL_DIR}/env.sh"
+# --- 主脚本逻辑 ---
+main() {
+    echo -e "${CYAN}=====================================================${NC}"
+    echo -e "${CYAN}  运行安装脚本 ${SCRIPT_VERSION}               ${NC}"
+    echo -e "${CYAN}=====================================================${NC}"
 
-  info "自检：打印帮助..."
-  ( cd "${INSTALL_DIR}" && ./VanitySearch -h >/dev/null 2>&1 || true )
-  info "完成。可执行文件：${INSTALL_DIR}/VanitySearch"
-  echo
-  echo "使用示例："
-  echo "  cd '${INSTALL_DIR}'"
-  echo "  source ./env.sh"
-  echo "  ./VanitySearch -h"
-  echo "  ./VanitySearch -l               # 列出 CUDA 设备（GPU 构建成功且可访问时）"
-  echo "  ./VanitySearch -gpu -t 1 1YourPrefixHere"
+    # 0. 自动修复并更新 APT 源
+    echo -e "\n${YELLOW}---> 第 0 步: 自动修复并更新 APT 源...${NC}"
+    fix_apt_sources
+    echo -e "${GREEN}---> APT 源已成功修复并更新。${NC}"
+
+    # 1. 安装系统依赖
+    echo -e "\n${YELLOW}---> 第 1 步: 检查并安装系统依赖包...${NC}"
+    # apt-get update 已在 fix_apt_sources 函数中执行，此处无需重复
+    apt-get install -y build-essential git cmake python3 python3-pip libgmp-dev libsecp256k1-dev ocl-icd-opencl-dev nvidia-cuda-toolkit
+    echo -e "${GREEN}---> 依赖包检查与安装完成。${NC}"
+
+    # 2. 安装 KeyHunt
+    echo -e "\n${YELLOW}---> 第 2 步: 检查并安装 KeyHunt (用于 CPU)...${NC}"
+    if [ ! -f "keyhunt/keyhunt" ]; then
+        echo -e "未找到 keyhunt 可执行文件，开始全新安装..."
+        [ -d "keyhunt" ] && rm -rf keyhunt
+        git clone https://github.com/albertobsd/keyhunt.git
+        cd keyhunt
+        make clean || true
+        make -j$(nproc)
+        cd ..
+        echo -e "${GREEN}---> KeyHunt 全新安装完成！${NC}"
+    else
+        echo -e "${GREEN}---> 检测到 keyhunt 已安装，跳过安装步骤。${NC}"
+    fi
+    
+    # 验证 KeyHunt
+    echo -e "${YELLOW}---> 正在验证 KeyHunt...${NC}"
+    # 捕获帮助命令的输出，如果命令失败则输出为空
+    validation_output=$(./keyhunt/keyhunt -h 2>/dev/null || true)
+    if [ -n "$validation_output" ]; then
+        echo -e "${CYAN}--- KeyHunt 帮助信息 ---${NC}"
+        echo "$validation_output"
+        echo -e "${CYAN}--------------------------${NC}"
+        KEYHUNT_SUCCESS=true
+    else
+        echo -e "${RED}---> KeyHunt 验证失败：无法执行或没有帮助信息输出。${NC}"
+    fi
+
+    # 3. 安装/检查 BitCrack
+    echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
+    
+    # 检测当前 GPU 的计算能力
+    echo -e "${YELLOW}---> 正在检测 NVIDIA GPU 计算能力...${NC}"
+    local DETECTED_CAP
+    DETECTED_CAP=$(detect_compute_capability)
+    echo -e "${GREEN}---> 已检测到计算能力为: ${DETECTED_CAP}${NC}"
+    
+    local need_reinstall=false
+    
+    # 检查是否需要全新安装
+    if [ ! -f "BitCrack/bin/cuBitCrack" ]; then
+        echo -e "未找到 bitcrack 可执行文件，开始全新安装..."
+        need_reinstall=true
+    else
+        echo -e "${GREEN}---> 检测到 BitCrack 已安装，检查 COMPUTE_CAP 设置...${NC}"
+        # 检查 COMPUTE_CAP 是否匹配
+        if ! check_and_update_compute_cap "$DETECTED_CAP"; then
+            echo -e "${YELLOW}---> 需要重新安装 BitCrack。${NC}"
+            need_reinstall=true
+        fi
+    fi
+    
+    # 如果需要全新安装
+    if [ "$need_reinstall" = true ]; then
+        [ -d "BitCrack" ] && rm -rf BitCrack
+        echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
+        git clone https://github.com/brichard19/BitCrack.git
+        cd BitCrack
+        echo -e "${YELLOW}---> 正在设置 COMPUTE_CAP=${DETECTED_CAP} 并开始编译...${NC}"
+        sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${DETECTED_CAP}/" Makefile
+        make clean || true
+        make -j$(nproc) BUILD_CUDA=1 BUILD_OPENCL=1
+        cd ..
+        echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
+    fi
+    
+    # 验证 BitCrack
+    echo -e "${YELLOW}---> 正在验证 BitCrack...${NC}"
+    if [ -f "BitCrack/bin/cuBitCrack" ]; then
+        # 使用正确的路径并捕获输出
+        validation_output=$(./BitCrack/bin/cuBitCrack --help 2>/dev/null || true)
+        if [ -n "$validation_output" ]; then
+            echo -e "${CYAN}--- BitCrack 帮助信息 ---${NC}"
+            echo "$validation_output"
+            echo -e "${CYAN}---------------------------${NC}"
+            BITCRACK_SUCCESS=true
+        else
+            echo -e "${RED}---> BitCrack 验证失败：无法执行或没有帮助信息输出。${NC}"
+        fi
+    else
+        echo -e "${RED}---> BitCrack 验证失败：编译后未找到 bin/cuBitCrack 可执行文件。${NC}"
+    fi
+
+    # --- 最终总结 ---
+    echo -e "\n${CYAN}=====================================================${NC}"
+    echo -e "${CYAN}                     安装总结                      ${NC}"
+    echo -e "${CYAN}=====================================================${NC}"
+
+    if [ "$KEYHUNT_SUCCESS" = true ]; then
+        echo -e "  [ ${GREEN}成功${NC} ] KeyHunt (CPU)"
+    else
+        echo -e "  [ ${RED}失败${NC} ] KeyHunt (CPU)"
+    fi
+
+    if [ "$BITCRACK_SUCCESS" = true ]; then
+        echo -e "  [ ${GREEN}成功${NC} ] BitCrack (GPU) - COMPUTE_CAP: ${DETECTED_CAP}"
+    else
+        echo -e "  [ ${RED}失败${NC} ] BitCrack (GPU)"
+    fi
+    echo -e "${CYAN}=====================================================${NC}"
+
+    echo -e "\n${GREEN}所有检查已完成 (版本: ${SCRIPT_VERSION})。${NC}"
+    echo -e "您现在可以在 Python 脚本中使用以下可执行文件了:"
+    echo -e "KeyHunt:   $(pwd)/keyhunt/keyhunt"
+    echo -e "BitCrack:  $(pwd)/BitCrack/bin/cuBitCrack"
 }
-post_setup
 
-info "全部完成！日志：${LOG_FILE}"
+# --- 运行主函数 ---
+main
