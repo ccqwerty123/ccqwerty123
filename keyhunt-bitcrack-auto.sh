@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # KeyHunt (CPU) 和 BitCrack (GPU) 的全自动安装与验证脚本
-# 版本: 1.6.0 - 修复 BitCrack embedcl 编译问题
+# 版本: 1.7.0 - 新增对 djmuratb/BitCrack2 修改版的自动检测与支持
 #
 # 特性:
 # 1.  APT 源自动修复: 脚本启动时自动切换到国内清华源，并解决常见的锁问题。
@@ -9,12 +9,12 @@
 # 3.  幂等性: 重复运行会跳过已完成的安装。
 # 4.  智能验证: 通过捕获帮助命令的输出来判断是否成功，并显示输出。
 # 5.  COMPUTE_CAP 检查: 自动检查并更新 BitCrack Makefile 中的 COMPUTE_CAP 值。
-# 6.  embedcl 修复: 确保 embedcl 工具正确编译和运行。
+# 6.  多版本支持: 自动检测 BitCrack 是原版还是 djmuratb 修改版，并执行正确的编译流程。
 # 7.  最终总结: 在脚本末尾明确报告每个工具的最终安装状态。
 #
 
 # --- 脚本版本 ---
-SCRIPT_VERSION="1.6.0 - 修复 BitCrack embedcl 编译问题"
+SCRIPT_VERSION="1.7.0 - 新增对 djmuratb/BitCrack2 修改版的自动检测与支持"
 
 # --- Bash 颜色代码 ---
 GREEN='\033[0;32m'
@@ -88,7 +88,7 @@ fix_apt_sources() {
   mv /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%s) || true
 
   # 5. 写入纯净的国内源
-  echo "[INFO] 写入纯净的国内源（清华大学 TUNA 源）..."
+  echo "[INFO] 写入纯净的国内源（腾讯云源）..."
   
   local UBUNTU_CODENAME
   UBUNTU_CODENAME=$(lsb_release -cs)
@@ -105,12 +105,6 @@ deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME} main restricted uni
 deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
 deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
 deb http://mirrors.tencentyun.com/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
-
-# 清华大学 TUNA 源 (Tsinghua University TUNA Mirror) - 已注释
-#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
-#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
-#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-backports main restricted universe multiverse
-#deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
 EOF
 
   # 6. 更新软件包列表
@@ -135,17 +129,14 @@ detect_compute_capability() {
     echo "$COMPUTE_CAP"
 }
 
-# --- 函数：编译 BitCrack 的 embedcl 工具 ---
+# --- 函数：编译 BitCrack 的 embedcl 工具 (仅限原版) ---
 build_embedcl() {
     local bitcrack_dir="$1"
-    echo -e "${YELLOW}---> 正在编译 embedcl 工具...${NC}"
+    echo -e "${YELLOW}---> [v1] 正在编译 embedcl 工具...${NC}"
     
     cd "${bitcrack_dir}/embedcl"
     
-    # 清理旧的编译文件
     rm -f embedcl *.o || true
-    
-    # 编译 embedcl
     g++ -o embedcl main.cpp
     
     if [ ! -f "embedcl" ]; then
@@ -154,35 +145,30 @@ build_embedcl() {
         return 1
     fi
     
-    echo -e "${GREEN}---> embedcl 工具编译成功！${NC}"
+    echo -e "${GREEN}---> [v1] embedcl 工具编译成功！${NC}"
     cd ..
     return 0
 }
 
-# --- 函数：处理 OpenCL 内核文件 ---
+# --- 函数：处理 OpenCL 内核文件 (仅限原版) ---
 process_opencl_kernels() {
     local bitcrack_dir="$1"
-    echo -e "${YELLOW}---> 正在处理 OpenCL 内核文件...${NC}"
+    echo -e "${YELLOW}---> [v1] 正在处理 OpenCL 内核文件...${NC}"
     
     cd "${bitcrack_dir}"
     
-    # 确保 embedcl 工具存在
     if [ ! -f "embedcl/embedcl" ]; then
         echo -e "${RED}错误: embedcl 工具不存在！${NC}"
         cd ..
         return 1
     fi
     
-    # 处理所有 .cl 文件
     for cl_file in clMath/*.cl clUtil/*.cl; do
         if [ -f "$cl_file" ]; then
             echo -e "处理 $cl_file..."
             base_name=$(basename "$cl_file" .cl)
             dir_name=$(dirname "$cl_file")
-            
-            # 生成嵌入的 C++ 文件
             ./embedcl/embedcl "$cl_file" "${dir_name}/${base_name}_cl.cpp" _${base_name}_cl
-            
             if [ ! -f "${dir_name}/${base_name}_cl.cpp" ]; then
                 echo -e "${RED}错误: 无法生成 ${dir_name}/${base_name}_cl.cpp${NC}"
                 cd ..
@@ -191,31 +177,26 @@ process_opencl_kernels() {
         fi
     done
     
-    echo -e "${GREEN}---> OpenCL 内核文件处理完成！${NC}"
+    echo -e "${GREEN}---> [v1] OpenCL 内核文件处理完成！${NC}"
     cd ..
     return 0
 }
 
-# --- 函数：编译 BitCrack ---
+# --- 函数：编译 BitCrack (原版) ---
 compile_bitcrack() {
     local bitcrack_dir="$1"
     local compute_cap="$2"
     
-    echo -e "${YELLOW}---> 开始编译 BitCrack...${NC}"
+    echo -e "${YELLOW}---> [v1] 开始编译 BitCrack (原版)...${NC}"
     cd "${bitcrack_dir}"
     
-    # 设置 COMPUTE_CAP
     echo -e "${YELLOW}---> 设置 COMPUTE_CAP=${compute_cap}...${NC}"
     sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${compute_cap}/" Makefile
     
-    # 清理旧的编译文件
     make clean || true
-    
-    # 编译 BitCrack（分步骤以便更好地调试）
     echo -e "${YELLOW}---> 编译 CUDA 版本...${NC}"
     make BUILD_CUDA=1 -j$(nproc)
     
-    # 检查 CUDA 版本是否编译成功
     if [ ! -f "bin/cuBitCrack" ]; then
         echo -e "${YELLOW}警告: CUDA 版本编译可能失败，尝试只编译 OpenCL 版本...${NC}"
         make clean || true
@@ -223,11 +204,43 @@ compile_bitcrack() {
     fi
     
     cd ..
-    echo -e "${GREEN}---> BitCrack 编译完成！${NC}"
+    echo -e "${GREEN}---> [v1] BitCrack 编译完成！${NC}"
     return 0
 }
 
-# --- 函数：检查并更新 BitCrack Makefile 中的 COMPUTE_CAP ---
+# --- 函数：编译 BitCrack v2 (djmuratb 修改版) ---
+compile_bitcrack_v2() {
+    local bitcrack_dir="$1"
+    local compute_cap="$2"
+    
+    echo -e "${YELLOW}---> [v2] 开始编译 BitCrack v2 (djmuratb)...${NC}"
+    cd "${bitcrack_dir}"
+    
+    echo -e "${YELLOW}---> 设置 COMPUTE_CAP=${compute_cap}...${NC}"
+    sed -i "s/^\s*COMPUTE_CAP\s*=.*/COMPUTE_CAP=${compute_cap}/" Makefile
+    
+    make clean || true
+    echo -e "${YELLOW}---> 正在编译...${NC}"
+    make -j$(nproc)
+
+    if [ -f "cuBitCrack" ] || [ -f "clBitCrack" ]; then
+        echo -e "${GREEN}---> 编译成功，正在整理文件到 bin/ 目录...${NC}"
+        mkdir -p bin
+        [ -f "cuBitCrack" ] && mv cuBitCrack bin/
+        [ -f "clBitCrack" ] && mv clBitCrack bin/
+    else
+        echo -e "${RED}---> [v2] BitCrack v2 编译失败，未找到可执行文件。${NC}"
+        cd ..
+        return 1
+    fi
+    
+    cd ..
+    echo -e "${GREEN}---> [v2] BitCrack v2 编译完成！${NC}"
+    return 0
+}
+
+
+# --- 函数：检查并更新 BitCrack Makefile 中的 COMPUTE_CAP (自动检测版本) ---
 check_and_update_compute_cap() {
     local current_cap="$1"
     local bitcrack_dir="BitCrack"
@@ -237,7 +250,7 @@ check_and_update_compute_cap() {
     
     if [ ! -f "$makefile_path" ]; then
         echo -e "${YELLOW}---> Makefile 不存在，需要重新克隆项目。${NC}"
-        return 1
+        return 1 # 失败，表示需要重新克隆
     fi
     
     local makefile_cap
@@ -248,31 +261,29 @@ check_and_update_compute_cap() {
     
     if [ "$makefile_cap" = "$current_cap" ]; then
         echo -e "${GREEN}---> COMPUTE_CAP 值正确，无需更新。${NC}"
-        return 0
+        return 0 # 成功，无需重新编译
     else
         echo -e "${YELLOW}---> COMPUTE_CAP 值不匹配，需要更新并重新编译。${NC}"
         
-        # 完整重新编译
-        cd "$bitcrack_dir"
+        # --- 自动检测版本并执行相应的重新编译流程 ---
+        if [ -d "${bitcrack_dir}/embedcl" ]; then
+            echo -e "${CYAN}---> 检测到为原始版 BitCrack，执行 v1 重新编译...${NC}"
+            build_embedcl "${bitcrack_dir}"
+            process_opencl_kernels "${bitcrack_dir}"
+            compile_bitcrack "${bitcrack_dir}" "$current_cap"
+        else
+            echo -e "${CYAN}---> 检测到为修改版 BitCrack2，执行 v2 重新编译...${NC}"
+            compile_bitcrack_v2 "${bitcrack_dir}" "$current_cap"
+        fi
         
-        # 先编译 embedcl
-        build_embedcl "."
-        
-        # 处理 OpenCL 内核
-        process_opencl_kernels "."
-        
-        # 编译 BitCrack
-        compile_bitcrack "." "$current_cap"
-        
-        cd ..
-        return 0
+        return 0 # 成功，已尝试重新编译
     fi
 }
 
 # --- 主脚本逻辑 ---
 main() {
     echo -e "${CYAN}=====================================================${NC}"
-    echo -e "${CYAN}  运行安装脚本 ${SCRIPT_VERSION}               ${NC}"
+    echo -e "${CYAN}  运行安装脚本 ${SCRIPT_VERSION} ${NC}"
     echo -e "${CYAN}=====================================================${NC}"
 
     # 0. 自动修复并更新 APT 源
@@ -304,8 +315,7 @@ main() {
     
     # 验证 KeyHunt
     echo -e "${YELLOW}---> 正在验证 KeyHunt...${NC}"
-    validation_output=$(./keyhunt/keyhunt -h 2>/dev/null || true)
-    if [ -n "$validation_output" ]; then
+    if validation_output=$(./keyhunt/keyhunt -h 2>/dev/null); then
         echo -e "${CYAN}--- KeyHunt 帮助信息 (前10行) ---${NC}"
         echo "$validation_output" | head -n 10
         echo -e "${CYAN}--------------------------${NC}"
@@ -317,79 +327,72 @@ main() {
     # 3. 安装/检查 BitCrack
     echo -e "\n${YELLOW}---> 第 3 步: 检查并安装 BitCrack (用于 GPU)...${NC}"
     
-    # 检测当前 GPU 的计算能力
-    echo -e "${YELLOW}---> 正在检测 NVIDIA GPU 计算能力...${NC}"
     local DETECTED_CAP
     DETECTED_CAP=$(detect_compute_capability)
     echo -e "${GREEN}---> 已检测到计算能力为: ${DETECTED_CAP}${NC}"
     
     local need_reinstall=false
     
-    # 检查是否需要全新安装
     if [ ! -f "BitCrack/bin/cuBitCrack" ] && [ ! -f "BitCrack/bin/clBitCrack" ]; then
         echo -e "未找到 BitCrack 可执行文件，开始全新安装..."
         need_reinstall=true
     else
         echo -e "${GREEN}---> 检测到 BitCrack 已安装，检查 COMPUTE_CAP 设置...${NC}"
-        # 检查 COMPUTE_CAP 是否匹配
         if ! check_and_update_compute_cap "$DETECTED_CAP"; then
             echo -e "${YELLOW}---> 需要重新安装 BitCrack。${NC}"
             need_reinstall=true
         fi
     fi
     
-    # 如果需要全新安装
     if [ "$need_reinstall" = true ]; then
         [ -d "BitCrack" ] && rm -rf BitCrack
         echo -e "${YELLOW}---> 正在克隆 BitCrack 项目...${NC}"
-        # --- 修改开始 ---
-        # 原本的地址，注释掉备用
-        # git clone https://github.com/brichard19/BitCrack.git
-        # 使用修改版的地址，并确保克隆到名为 "BitCrack" 的文件夹
-        git clone https://github.com/djmuratb/BitCrack2.git BitCrack
-        # --- 修改结束 ---
         
-        # 编译 embedcl 工具
-        if ! build_embedcl "BitCrack"; then
-            echo -e "${RED}---> embedcl 工具编译失败！${NC}"
-            BITCRACK_SUCCESS=false
-        else
-            # 处理 OpenCL 内核文件
-            if ! process_opencl_kernels "BitCrack"; then
-                echo -e "${RED}---> OpenCL 内核处理失败！${NC}"
+        # --- 克隆修改版仓库，原版地址已注释备用 ---
+        # 原版地址: # git clone https://github.com/brichard19/BitCrack.git
+        git clone https://github.com/djmuratb/BitCrack2.git BitCrack
+        
+        # --- 自动检测版本并执行相应的编译流程 ---
+        if [ -d "BitCrack/embedcl" ]; then
+            echo -e "${CYAN}---> 检测到为原始版 BitCrack，执行 v1 安装流程...${NC}"
+            if ! build_embedcl "BitCrack" || ! process_opencl_kernels "BitCrack" || ! compile_bitcrack "BitCrack" "$DETECTED_CAP"; then
+                echo -e "${RED}---> BitCrack (原版) 安装失败！${NC}"
                 BITCRACK_SUCCESS=false
             else
-                # 编译 BitCrack
-                if ! compile_bitcrack "BitCrack" "$DETECTED_CAP"; then
-                    echo -e "${RED}---> BitCrack 编译失败！${NC}"
-                    BITCRACK_SUCCESS=false
-                else
-                    echo -e "${GREEN}---> BitCrack 全新安装完成！${NC}"
-                fi
+                echo -e "${GREEN}---> BitCrack (原版) 全新安装完成！${NC}"
+            fi
+        else
+            echo -e "${CYAN}---> 检测到为修改版 BitCrack2，执行 v2 安装流程...${NC}"
+            if ! compile_bitcrack_v2 "BitCrack" "$DETECTED_CAP"; then
+                 echo -e "${RED}---> BitCrack v2 (修改版) 安装失败！${NC}"
+                 BITCRACK_SUCCESS=false
+            else
+                 echo -e "${GREEN}---> BitCrack v2 (修改版) 全新安装完成！${NC}"
             fi
         fi
     fi
     
     # 验证 BitCrack
     echo -e "${YELLOW}---> 正在验证 BitCrack...${NC}"
+    validation_output=""
+    executable_path=""
     if [ -f "BitCrack/bin/cuBitCrack" ]; then
         validation_output=$(./BitCrack/bin/cuBitCrack --help 2>/dev/null || true)
-        if [ -n "$validation_output" ]; then
-            echo -e "${CYAN}--- BitCrack (CUDA) 帮助信息 (前10行) ---${NC}"
-            echo "$validation_output" | head -n 10
-            echo -e "${CYAN}---------------------------${NC}"
-            BITCRACK_SUCCESS=true
-        fi
+        executable_path="./BitCrack/bin/cuBitCrack"
+        executable_type="CUDA"
     elif [ -f "BitCrack/bin/clBitCrack" ]; then
         validation_output=$(./BitCrack/bin/clBitCrack --help 2>/dev/null || true)
-        if [ -n "$validation_output" ]; then
-            echo -e "${CYAN}--- BitCrack (OpenCL) 帮助信息 (前10行) ---${NC}"
-            echo "$validation_output" | head -n 10
-            echo -e "${CYAN}---------------------------${NC}"
-            BITCRACK_SUCCESS=true
-        fi
+        executable_path="./BitCrack/bin/clBitCrack"
+        executable_type="OpenCL"
+    fi
+    
+    if [ -n "$validation_output" ]; then
+        echo -e "${CYAN}--- BitCrack (${executable_type}) 帮助信息 (前10行) ---${NC}"
+        echo "$validation_output" | head -n 10
+        echo -e "${CYAN}---------------------------${NC}"
+        BITCRACK_SUCCESS=true
     else
-        echo -e "${RED}---> BitCrack 验证失败：未找到可执行文件。${NC}"
+        echo -e "${RED}---> BitCrack 验证失败：未找到可执行文件或执行出错。${NC}"
     fi
 
     # --- 最终总结 ---
