@@ -251,41 +251,162 @@ def submit_result(session, work_unit, found, private_key=None):
 # --- 5. 硬件检测与挖矿任务执行模块 (少量修改) ---
 # ==============================================================================
 
+def heavy_calculation(n):
+    """
+    一个简单的计算密集型任务，用于消耗CPU时间。
+    它的作用是模拟真实的工作负载。
+    """
+    return sum(i * i for i in range(n))
+
+def _test_cpu_performance(
+    max_cores_to_test=16, 
+    intensity=2500000,
+    num_repeats=3,
+    efficiency_threshold=1.05
+):
+    """
+    [V8 优化版] 通过更稳定、更智能的基准测试来探测最佳CPU线程数。
+    
+    返回“最具性价比”的核心数。如果测试失败，则返回 None。
+    """
+    print("   → 开始CPU性能基准测试 (V8 稳定版)...")
+    
+    try:
+        logical_cores = os.cpu_count()
+        if not logical_cores:
+            print("   ⚠️ 无法自动检测CPU核心数。")
+            return None
+    except NotImplementedError:
+        print("   ⚠️ os.cpu_count() 在此系统上不受支持。")
+        return None
+
+    cores_to_test = min(logical_cores, max_cores_to_test)
+    if cores_to_test <= 0:
+        return 1
+
+    print(f"   → 检测到 {logical_cores} 个逻辑核心。将对 1 到 {cores_to_test} 个核心进行 {num_repeats} 轮测试。")
+
+    print("   → 正在预热CPU...")
+    with multiprocessing.Pool(processes=cores_to_test) as pool:
+        pool.map(heavy_calculation, [intensity // 10] * cores_to_test)
+
+    num_tasks = cores_to_test * 4 
+    data = [intensity] * num_tasks
+    
+    results = []
+    print("   → 开始多核性能测试:")
+    
+    for i in range(1, cores_to_test + 1):
+        timings = []
+        for j in range(num_repeats):
+            start_time = time.perf_counter()
+            try:
+                with multiprocessing.Pool(processes=i) as pool:
+                    pool.map(heavy_calculation, data)
+            except Exception as e:
+                print(f"\n   ⚠️ 在测试 {i} 个核心时出错: {e}")
+                if i == 1: return None 
+                break
+            end_time = time.perf_counter()
+            timings.append(end_time - start_time)
+        
+        if not timings: continue
+
+        best_time_for_core_i = min(timings)
+        results.append({'cores': i, 'time': best_time_for_core_i})
+        
+        timings_str = ", ".join([f"{t:.3f}s" for t in timings])
+        print(f"     - {i} 核心: 最佳 {best_time_for_core_i:.3f}s (原始数据: [{timings_str}])")
+
+    if not results:
+        print("   ⚠️ 基准测试未能产生任何结果。")
+        return None
+
+    best_run = min(results, key=lambda x: x['time'])
+    best_time = best_run['time']
+    
+    recommended_cores = best_run['cores']
+    for result in results:
+        if result['time'] <= best_time * efficiency_threshold:
+            recommended_cores = result['cores']
+            break
+
+    print(f"\n   → 测试完成。最佳性能由 {best_run['cores']} 核实现 (用时 {best_time:.3f}s)。")
+    if recommended_cores != best_run['cores']:
+        print(f"   → 智能分析发现，使用 {recommended_cores} 个核心已能达到峰值性能的95%以上，是更高效的选择。")
+    
+    return recommended_cores
+
 def detect_hardware():
-    """[V5 修改] 统一硬件检测函数。"""
+    """[V9 修正] 优化GPU参数以适应显存限制，并集成稳定的CPU核心探测。"""
     print_header("硬件自检")
     hardware_config = {'has_gpu': False, 'gpu_params': None, 'cpu_threads': 1}
-    default_gpu_params = {'blocks': 288, 'threads': 256, 'points': 1024}
+    
+    # --- GPU 检测部分 (修正参数) ---
+    # [V9 修正] 为算力7.5（如Tesla T4, RTX 20系列）提供了更保守、更安全的参数，
+    # 避免因显存不足而崩溃。之前的参数对16GB显存的T4来说过于激进。
+    # 原始作者的默认值是一个很好的、经过验证的起点。
+    safe_default_params = {'blocks': 288, 'threads': 256, 'points': 1024}
+    
+    compute_cap_params = {
+        '8.9': {'blocks': 896, 'threads': 256, 'points': 2048}, # Ada Lovelace (e.g., RTX 4090)
+        '8.6': {'blocks': 588, 'threads': 256, 'points': 2048}, # Ampere (e.g., RTX 3080/3090)
+        '8.0': {'blocks': 476, 'threads': 256, 'points': 1024}, # Ampere (e.g., A100)
+        '7.5': safe_default_params, # Turing (e.g., Tesla T4, RTX 2080) - 使用安全参数
+        '7.0': {'blocks': 252, 'threads': 256, 'points': 1024}, # Volta (e.g., Tesla V100)
+        '6.1': {'blocks': 196, 'threads': 256, 'points': 1024}, # Pascal (e.g., GTX 1080)
+    }
+    
     try:
-        cmd_tune = ['nvidia-smi', '--query-gpu=name,multiprocessor_count', '--format=csv,noheader,nounits']
-        result = subprocess.run(cmd_tune, capture_output=True, text=True, check=True, timeout=5)
-        gpu_name, sm_count_str = result.stdout.strip().split(', ')
-        if not sm_count_str.isdigit(): raise ValueError(f"SM Count '{sm_count_str}' 不是有效数字")
-        sm_count = int(sm_count_str)
+        cmd = ['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader']
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        gpu_name, compute_cap = result.stdout.strip().split(', ')
+        
         hardware_config['has_gpu'] = True
-        hardware_config['gpu_params'] = {'blocks': sm_count * 7, 'threads': 256, 'points': 1024}
-        print(f"✅ GPU: {gpu_name} (SM: {sm_count}) -> 检测成功，已自动配置性能参数。")
-    except Exception as e_tune:
-        print(f"⚠️ 自动GPU参数调优失败 (原因: {e_tune})。正在尝试基本检测...")
-        try:
-            cmd_basic = ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader,nounits']
-            result_basic = subprocess.run(cmd_basic, capture_output=True, text=True, check=True, timeout=5)
-            gpu_name_basic = result_basic.stdout.strip()
-            hardware_config['has_gpu'] = True
-            hardware_config['gpu_params'] = default_gpu_params
-            print(f"✅ GPU: {gpu_name_basic} -> 基本检测成功。GPU任务将使用默认性能参数。")
-        except Exception as e_detect:
-            print(f"❌ 最终确认：未检测到有效NVIDIA GPU (原因: {e_detect}) -> 将只使用 CPU。")
-            hardware_config['has_gpu'] = False
-    try:
-        cpu_cores = os.cpu_count()
-        threads = cpu_cores if hardware_config['has_gpu'] else max(1, cpu_cores - 1 if cpu_cores > 1 else 1)
-        hardware_config['cpu_threads'] = threads
-        print(f"✅ CPU: {cpu_cores} 核心 -> CPU 任务将使用 {threads} 个线程。")
+        # 优先从字典中获取参数，如果找不到，则使用安全默认值
+        params = compute_cap_params.get(compute_cap, safe_default_params)
+        hardware_config['gpu_params'] = params
+        
+        print(f"✅ GPU: {gpu_name} (Compute Cap: {compute_cap})")
+        if compute_cap in compute_cap_params:
+            print(f"   → 已加载针对 Compute Cap {compute_cap} 的优化参数。")
+        else:
+            print(f"   ⚠️ 未知的计算能力 {compute_cap}，已回退到安全的默认参数。")
+        print(f"   → BitCrack参数: -b {params['blocks']} -t {params['threads']} -p {params['points']}")
+
     except Exception as e:
-        hardware_config['cpu_threads'] = 15
-        print(f"⚠️ CPU核心检测失败 (原因: {e}) -> CPU 任务将使用默认 {hardware_config['cpu_threads']} 个线程。")
+        if isinstance(e, FileNotFoundError):
+            print("❌ 未检测到NVIDIA GPU (未找到 nvidia-smi 命令)。")
+        else:
+            print(f"❌ GPU检测失败 (原因: {e})。")
+        print("   → 将仅使用CPU模式运行。")
+        hardware_config['has_gpu'] = False
+    
+    # --- CPU 检测部分 (V8 稳定版) ---
+    recommended_cores = _test_cpu_performance()
+    
+    if recommended_cores is not None:
+        hardware_config['cpu_threads'] = recommended_cores
+        print(f"✅ CPU: 智能探测完成 → 推荐使用 {recommended_cores} 个线程。")
+    else:
+        # 性能测试失败，使用安全的回退逻辑
+        if hardware_config['has_gpu']:
+            threads = 2
+            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 有GPU，使用 {threads} 个线程。")
+        else:
+            threads = 1
+            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 无GPU，使用 {threads} 个线程。")
+        hardware_config['cpu_threads'] = threads
+    
+    # --- 总结与命令示例 ---
+    if hardware_config['has_gpu']:
+        print("\n📝 BitCrack推荐命令示例:")
+        params = hardware_config['gpu_params']
+        print(f"   ./cuBitCrack -b {params['blocks']} -t {params['threads']} -p {params['points']} [其他参数]")
+    
     return hardware_config
+
+
 
 # --- CPU 任务执行函数 (无修改) ---
 def setup_task_logger(name, log_file):
