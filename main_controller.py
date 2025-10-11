@@ -251,71 +251,89 @@ def submit_result(session, work_unit, found, private_key=None):
 # --- 5. 硬件检测与挖矿任务执行模块 (少量修改) ---
 # ==============================================================================
 
-def detect_hardware():
-    """[V7 修改] 集成基于基准测试的CPU核心探测，以适应云环境。"""
-    print_header("硬件自检")
-    hardware_config = {'has_gpu': False, 'gpu_params': None, 'cpu_threads': 1}
+def heavy_calculation(n):
+    """
+    一个简单的计算密集型任务，用于消耗CPU时间。
+    它的作用是模拟真实的工作负载。
+    """
+    return sum(i * i for i in range(n))
+
+def _test_cpu_performance(max_cores_to_test=16, calculation_intensity=200000, num_tasks_multiplier=4):
+    """
+    [V7 新增] 通过运行一个计算密集型基准测试来探测最佳的CPU线程数。
     
-    # --- GPU 检测部分 (与之前版本相同) ---
-    compute_cap_params = {
-        '8.9': {'blocks': 896, 'threads': 256, 'points': 2048},
-        '8.6': {'blocks': 588, 'threads': 256, 'points': 2048},
-        '8.0': {'blocks': 476, 'threads': 256, 'points': 1024},
-        '7.5': {'blocks': 476, 'threads': 256, 'points': 2048},
-        '7.0': {'blocks': 252, 'threads': 256, 'points': 1024},
-        '6.1': {'blocks': 196, 'threads': 256, 'points': 1024},
-        '6.0': {'blocks': 392, 'threads': 256, 'points': 1024},
-        '5.2': {'blocks': 168, 'threads': 256, 'points': 1024},
-        '5.0': {'blocks': 91, 'threads': 256, 'points': 1024},
-    }
-    default_gpu_params = {'blocks': 476, 'threads': 256, 'points': 2048}
+    返回性能最佳时的核心数。如果测试失败，则返回 None。
+    """
+    print("   → 开始CPU性能基准测试以确定最佳线程数...")
     
     try:
-        cmd = ['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader']
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
-        gpu_name, compute_cap = result.stdout.strip().split(', ')
-        
-        hardware_config['has_gpu'] = True
-        params = compute_cap_params.get(compute_cap, default_gpu_params)
-        hardware_config['gpu_params'] = params
-        
-        print(f"✅ GPU: {gpu_name} (Compute Cap: {compute_cap})")
-        if compute_cap in compute_cap_params:
-            print(f"   → 已加载针对 Compute Cap {compute_cap} 的优化参数。")
-        else:
-            print(f"   ⚠️ 未知的计算能力，使用默认优化参数。")
-        print(f"   → BitCrack参数: -b {params['blocks']} -t {params['threads']} -p {params['points']}")
+        # 1. 使用标准库获取CPU逻辑核心数
+        logical_cores = os.cpu_count()
+        if not logical_cores:
+            print("   ⚠️ 无法自动检测CPU核心数。")
+            return None
+    except NotImplementedError:
+        print("   ⚠️ os.cpu_count() 在此系统上不受支持。")
+        return None
 
-    except Exception as e:
-        print(f"❌ GPU检测失败 (原因: {e})。将仅使用CPU模式运行。")
-        hardware_config['has_gpu'] = False
+    # 限制测试的核心数，避免在拥有超多核心的服务器上花费过长时间
+    cores_to_test = min(logical_cores, max_cores_to_test)
+    if cores_to_test <= 0:
+        return 1 # 如果检测结果异常，安全回退到1
+
+    print(f"   → 检测到 {logical_cores} 个逻辑核心。将测试 1 到 {cores_to_test} 个核心的性能。")
+
+    # 2. 准备一个任务列表。任务总工作量是固定的，以确保比较的公平性。
+    # 任务数量应该是核心数的几倍，以确保所有核心都能被充分利用。
+    num_tasks = cores_to_test * num_tasks_multiplier
+    data = [calculation_intensity] * num_tasks
     
-    # --- CPU 检测部分 (全新逻辑) ---
-    recommended_cores = _test_cpu_performance()
+    results = []
+
+    # 3. 循环测试不同数量的进程
+    for i in range(1, cores_to_test + 1):
+        start_time = time.perf_counter()
+        try:
+            # 使用 multiprocessing.Pool 创建一个拥有 i 个进程的进程池来并行执行任务
+            with multiprocessing.Pool(processes=i) as pool:
+                pool.map(heavy_calculation, data)
+        except Exception as e:
+            # 在某些受限环境（如特定的Docker容器）中，创建进程可能会失败
+            print(f"\n   ⚠️ 在测试 {i} 个核心时出错: {e}")
+            if i == 1: return None # 如果连单进程都失败，说明多进程模块完全不可用
+            break # 如果在多于1个进程时失败，则停止测试
+
+        end_time = time.perf_counter()
+        execution_time = end_time - start_time
+        
+        # 使用更美观的方式在同一行更新进度
+        progress_bar = '█' * i + ' ' * (cores_to_test - i)
+        sys.stdout.write(f"\r   → 测试中 [{progress_bar}] {i}/{cores_to_test} 核心... | 用时: {execution_time:.4f}s")
+        sys.stdout.flush()
+        
+        results.append({'cores': i, 'time': execution_time})
+        
+        # 启发式停止：如果增加核心后性能反而显著变差，说明已达到物理核心瓶颈，可以提前停止
+        if i > 4 and len(results) > 1:
+            # 如果当前时间比上一个结果差15%以上，则停止
+            if execution_time > results[-2]['time'] * 1.15:
+                print("\n   → 性能出现下降，提前停止测试以节省时间。")
+                break
+
+    print() # 测试结束后换行
+
+    if not results:
+        print("   ⚠️ 基准测试未能产生任何结果。")
+        return None
+
+    # 4. 分析结果，找到用时最短（性能最好）的配置
+    fastest_run = min(results, key=lambda x: x['time'])
+    recommended_cores = fastest_run['cores']
     
-    if recommended_cores is not None:
-        # 性能测试成功
-        hardware_config['cpu_threads'] = recommended_cores
-        print(f"✅ CPU: 智能探测完成 → 推荐使用 {recommended_cores} 个线程。")
-    else:
-        # 性能测试失败，使用安全的回退逻辑
-        if hardware_config['has_gpu']:
-            # 有GPU时，CPU任务不重，用2个线程足矣，避免争抢
-            threads = 2
-            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 有GPU，使用 {threads} 个线程。")
-        else:
-            # 没GPU时，CPU是主力，但为避免系统卡死，只用1个
-            threads = 1
-            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 无GPU，使用 {threads} 个线程。")
-        hardware_config['cpu_threads'] = threads
-    
-    # --- 总结与命令示例 ---
-    if hardware_config['has_gpu']:
-        print("\n📝 BitCrack推荐命令示例:")
-        params = hardware_config['gpu_params']
-        print(f"   ./cuBitCrack -b {params['blocks']} -t {params['threads']} -p {params['points']} [其他参数]")
-    
-    return hardware_config
+    print(f"   → 测试完成。最快的结果是使用 {recommended_cores} 个核心 (用时 {fastest_run['time']:.4f}s)。")
+
+    return recommended_cores
+
 
 # --- CPU 任务执行函数 (无修改) ---
 def setup_task_logger(name, log_file):
