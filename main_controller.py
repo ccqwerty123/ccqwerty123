@@ -334,6 +334,79 @@ def _test_cpu_performance(max_cores_to_test=16, calculation_intensity=200000, nu
 
     return recommended_cores
 
+def detect_hardware():
+    """[V7 修改] 集成基于基准测试的CPU核心探测，以适应云环境。"""
+    print_header("硬件自检")
+    hardware_config = {'has_gpu': False, 'gpu_params': None, 'cpu_threads': 1}
+    
+    # --- GPU 检测部分 (与之前版本相同) ---
+    compute_cap_params = {
+        '8.9': {'blocks': 896, 'threads': 256, 'points': 2048},
+        '8.6': {'blocks': 588, 'threads': 256, 'points': 2048},
+        '8.0': {'blocks': 476, 'threads': 256, 'points': 1024},
+        '7.5': {'blocks': 476, 'threads': 256, 'points': 2048},
+        '7.0': {'blocks': 252, 'threads': 256, 'points': 1024},
+        '6.1': {'blocks': 196, 'threads': 256, 'points': 1024},
+        '6.0': {'blocks': 392, 'threads': 256, 'points': 1024},
+        '5.2': {'blocks': 168, 'threads': 256, 'points': 1024},
+        '5.0': {'blocks': 91, 'threads': 256, 'points': 1024},
+    }
+    default_gpu_params = {'blocks': 476, 'threads': 256, 'points': 2048}
+    
+    try:
+        # 注意：在没有安装nvidia-smi的机器上，这里会直接进入except块
+        cmd = ['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader']
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        gpu_name, compute_cap = result.stdout.strip().split(', ')
+        
+        hardware_config['has_gpu'] = True
+        params = compute_cap_params.get(compute_cap, default_gpu_params)
+        hardware_config['gpu_params'] = params
+        
+        print(f"✅ GPU: {gpu_name} (Compute Cap: {compute_cap})")
+        if compute_cap in compute_cap_params:
+            print(f"   → 已加载针对 Compute Cap {compute_cap} 的优化参数。")
+        else:
+            print(f"   ⚠️ 未知的计算能力，使用默认优化参数。")
+        print(f"   → BitCrack参数: -b {params['blocks']} -t {params['threads']} -p {params['points']}")
+
+    except Exception as e:
+        # 将错误信息简化，避免在没有GPU的机器上显示大段报错
+        if isinstance(e, FileNotFoundError):
+            print("❌ 未检测到NVIDIA GPU (未找到 nvidia-smi 命令)。")
+        else:
+            print(f"❌ GPU检测失败 (原因: {e})。")
+        print("   → 将仅使用CPU模式运行。")
+        hardware_config['has_gpu'] = False
+    
+    # --- CPU 检测部分 (全新逻辑) ---
+    recommended_cores = _test_cpu_performance()
+    
+    if recommended_cores is not None:
+        # 性能测试成功
+        hardware_config['cpu_threads'] = recommended_cores
+        print(f"✅ CPU: 智能探测完成 → 推荐使用 {recommended_cores} 个线程。")
+    else:
+        # 性能测试失败，使用安全的回退逻辑
+        if hardware_config['has_gpu']:
+            # 有GPU时，CPU任务不重，用2个线程足矣，避免争抢
+            threads = 2
+            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 有GPU，使用 {threads} 个线程。")
+        else:
+            # 没GPU时，CPU是主力，但为避免系统卡死，只用1个
+            threads = 1
+            print(f"⚠️ CPU: 探测失败，回退到安全模式 → 无GPU，使用 {threads} 个线程。")
+        hardware_config['cpu_threads'] = threads
+    
+    # --- 总结与命令示例 ---
+    if hardware_config['has_gpu']:
+        print("\n📝 BitCrack推荐命令示例:")
+        params = hardware_config['gpu_params']
+        print(f"   ./cuBitCrack -b {params['blocks']} -t {params['threads']} -p {params['points']} [其他参数]")
+    
+    return hardware_config
+
+
 
 # --- CPU 任务执行函数 (无修改) ---
 def setup_task_logger(name, log_file):
