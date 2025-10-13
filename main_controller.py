@@ -350,7 +350,7 @@ def detect_hardware():
     
     compute_cap_params = {
         '8.9': {'blocks': 896, 'threads': 256, 'points': 2048}, # Ada Lovelace (e.g., RTX 4090)
-        '8.6': {'blocks': 588, 'threads': 256, 'points': 2048}, # Ampere (e.g., RTX 3080/3090)
+        '8.6': {'blocks': 588, 'threads': 256, 'points': 1024}, # Ampere (e.g., RTX 3080/3090)
         '8.0': {'blocks': 476, 'threads': 256, 'points': 1024}, # Ampere (e.g., A100)
         '7.5': safe_default_params, # Turing (e.g., Tesla T4, RTX 2080) - 使用安全参数
         '7.0': {'blocks': 252, 'threads': 256, 'points': 1024}, # Volta (e.g., Tesla V100)
