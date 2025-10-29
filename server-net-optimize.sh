@@ -8,7 +8,7 @@
 # 2. 网络优化 (DNS, Hosts)
 # 3. Swap空间与内核参数管理
 # 4. 系统极限精简与优化
-# 5. 添加自定义Crontab计划任务
+# 5. 添加重启修改dns的Crontab计划任务
 #
 # 作者: Gemini & User
 # 日期: 2025-10-29
@@ -345,7 +345,7 @@ main_menu() {
                 ;;
             4)
                 clear
-                read -p "此操作将添加或更新root用户的Crontab任务，是否继续? (y/N): " confirm
+                read -p "此操作将添加或更新root重启修改dns的Crontab任务，是否继续? (y/N): " confirm
                 if [[ "$confirm" =~ ^[yY]$ ]]; then
                     add_cron_tasks
                 else
