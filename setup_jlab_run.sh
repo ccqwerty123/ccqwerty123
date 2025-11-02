@@ -5,6 +5,7 @@ trap 'echo "[ERROR] exit=$? line=$LINENO: $BASH_COMMAND" >&2' ERR
 # ========= 可调参数 =========
 PROFILE="${PROFILE:-1}"                 # 1=Jupyter直连(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
 INDEX_URL="${INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+INDEX_URL="${INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}"
 PORT="${PORT:-8888}"
 FRONT_PORT="${FRONT_PORT:-8080}"
 ROOT_DIR="${ROOT_DIR:-$PWD}"
