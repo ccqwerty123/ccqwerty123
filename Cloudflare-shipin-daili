@@ -1,0 +1,242 @@
+/**
+ * @name Universal Video Proxy Worker
+ * @version 2.0.0
+ * @description 一个功能强大的Cloudflare Worker脚本，用于代理和加速视频流。
+ * 
+ * 功能特性:
+ * 1. 自动识别并处理M3U8播放列表和MP4/WebM等直接视频文件。
+ * 2. 智能解析M3U8，包括嵌套的M3U8（多清晰度）和标签内的URI（如独立音轨）。
+ * 3. 自动判断国外资源进行代理，或使用 `&proxy=all` 参数强制全局代理。
+ * 4. 完整保留并传递原始URL中的查询参数（如 `?tag=21`），解决CDN鉴权问题。
+ * 5. 对直接视频文件进行流式代理，完美支持播放器拖动（HTTP Range requests）。
+ * 
+ * 使用方法:
+ * - M3U8: https://<你的Worker地址>/?url=<M3U8链接>
+ * - M3U8 (强制全局代理): https://<你的Worker地址>/?url=<M3U8链接>&proxy=all
+ * - 直接视频文件: https://<你的Worker地址>/?url=<MP4链接>
+ */
+
+// #############################
+// ##### START: 配置区域 #####
+// #############################
+
+// 用于M3U8自动判断的国外域名/CDN关键词列表。
+// 如果M3U8中的URL包含以下任意关键词，它将被自动代理。
+const FOREIGN_DOMAINS = [
+    // 常见国家/地区顶级域名 (TLD)
+    '.jp', '.kr', '.uk', '.us', '.de', '.fr', '.ru', '.ca', '.au', '.in', '.br',
+    // 国际通用顶级域名，通常国外服务商使用较多
+    '.io', '.co', '.tv', '.app', '.dev', '.net', '.org', '.info', '.com',
+    // 已知国外CDN或视频托管服务商的域名关键词
+    'akamai', 'cloudfront.net', 'fastly', 'vimeo', 'dailymotion', 
+    'googlevideo.com', 'ytimg.com', 'twimg.com' 
+  ];
+  
+  // 支持直接代理的视频文件扩展名列表。
+  // 如果 `url` 参数指向的链接以这些扩展名结尾，将被作为直接文件处理。
+  const DIRECT_VIDEO_EXTENSIONS = [
+    '.mp4', '.webm', '.mkv', '.flv', '.mov', '.avi'
+  ];
+  
+  // #############################
+  // #####  END: 配置区域  #####
+  // #############################
+  
+  
+  // Worker 的主入口点，监听所有传入的 fetch 事件
+  addEventListener('fetch', event => {
+    event.respondWith(handleRequest(event.request));
+  });
+  
+  /**
+   * 主请求处理函数，作为所有请求的路由器
+   * @param {Request} request 传入的请求对象
+   * @returns {Promise<Response>} 返回一个响应对象
+   */
+  async function handleRequest(request) {
+    // 从请求URL中解析出查询参数
+    const urlParams = new URL(request.url).searchParams;
+    const originalUrl = urlParams.get('url'); // 获取目标视频/M3U8的URL
+    const tsUrl = urlParams.get('ts_url');   // M3U8内部的ts片段地址，用于内部代理
+  
+    // ------------------------------------------------------------------
+    // 1. 优先处理M3U8内部的ts片段代理请求 (这是一个内部调用)
+    // 当M3U8被解析后，其中的ts文件URL会被替换成指向worker自己的链接，并带有ts_url参数
+    // ------------------------------------------------------------------
+    if (tsUrl) {
+      // 作为一个纯粹的代理，请求真实的ts文件并直接返回其内容
+      return fetch(tsUrl, { headers: request.headers });
+    }
+  
+    // ------------------------------------------------------------------
+    // 2. 检查是否有提供主URL，没有则返回使用说明
+    // ------------------------------------------------------------------
+    if (!originalUrl) {
+      return new Response(
+        '欢迎使用通用视频代理Worker。\n\n' +
+        '用法:\n' +
+        '1. M3U8: ?url=<M3U8_URL>[&proxy=all]\n' +
+        '2. 直接视频文件: ?url=<VIDEO_URL>', 
+        { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
+      );
+    }
+  
+    // ------------------------------------------------------------------
+    // 3. 智能路由：根据URL的格式，决定如何处理
+    // ------------------------------------------------------------------
+    try {
+      const urlPath = new URL(originalUrl).pathname.toLowerCase();
+      const forceProxy = urlParams.get('proxy') === 'all'; // 检查是否需要强制代理
+  
+      // 3.1 如果是M3U8文件
+      if (urlPath.endsWith('.m3u8')) {
+        return handleM3u8Request(request, originalUrl, forceProxy);
+      } 
+      // 3.2 如果是直接的视频文件
+      else if (isDirectVideoFile(urlPath)) {
+        return handleDirectVideoRequest(request, originalUrl);
+      } 
+      // 3.3 如果是无法识别的格式
+      else {
+        return new Response('不支持的URL格式。仅支持M3U8播放列表和常见的视频文件（.mp4, .webm等）。', { status: 400 });
+      }
+    } catch (error) {
+      // 捕获处理过程中可能发生的任何错误
+      return new Response('处理请求时出错: ' + error.message, { status: 500 });
+    }
+  }
+  
+  /**
+   * 核心函数：处理M3U8播放列表请求
+   * @param {Request} request 原始请求
+   * @param {string} originalUrl M3U8文件的原始URL
+   * @param {boolean} forceProxy 是否强制代理所有内容
+   * @returns {Promise<Response>} 返回修改后的M3U8内容
+   */
+  async function handleM3u8Request(request, originalUrl, forceProxy) {
+    // 请求原始的M3U8文件内容
+    const response = await fetch(originalUrl);
+  
+    // 关键修正：预先提取并保存原始M3U8链接中的查询参数 (如 ?tag=21)
+    // new URL(originalUrl) 会完整解析包括查询参数在内的所有部分
+    const originalUrlObject = new URL(originalUrl);
+    const originalSearchParams = originalUrlObject.search; // 这会得到 "?tag=21" 或空字符串
+  
+    // 获取M3U8文本内容
+    const m3u8Text = await response.text();
+    const lines = m3u8Text.split('\n'); // 按行分割
+    const newLines = []; // 用于存放修改后的行
+    const currentWorkerUrl = new URL(request.url); // 当前Worker的URL对象
+    
+    // 正则表达式，用于匹配并捕获 URI="..." 中的内容
+    const uriRegex = /URI="([^"]+)"/;
+  
+    for (const line of lines) {
+      // 1. 处理包含 URI="..." 的标签行 (例如音轨、密钥等)
+      if (line.includes('URI="')) {
+        const match = line.match(uriRegex);
+        if (match && match[1]) {
+          const originalUri = match[1];
+          // 将相对路径的URI补全为绝对路径
+          let absoluteUri = new URL(originalUri, originalUrlObject).href;
+          
+          const proxyParams = new URLSearchParams({ url: absoluteUri });
+          if (forceProxy) proxyParams.set('proxy', 'all');
+          const proxyUri = `${currentWorkerUrl.origin}${currentWorkerUrl.pathname}?${proxyParams.toString()}`;
+          
+          // 替换原始行中的URI为代理URI
+          const newLine = line.replace(originalUri, proxyUri);
+          newLines.push(newLine);
+        } else {
+           newLines.push(line); // 无法匹配则保留原样
+        }
+      } 
+      // 2. 处理自成一行的URL (通常是子m3u8或ts片段)
+      else if (line.trim() && !line.startsWith('#')) {
+        // 将相对路径补全为绝对路径
+        let absoluteUrl = new URL(line, originalUrlObject).href;
+        
+        // 关键修正：将原始查询参数附加到拼接好的绝对URL上
+        if (originalSearchParams && !absoluteUrl.includes('?')) {
+          // 只有当拼接后的URL不包含问号时才附加，避免重复
+          // 注意：更严谨的做法是合并参数，但对于M3U8场景，通常子链接不带参数，直接附加即可
+           const urlObj = new URL(absoluteUrl);
+           urlObj.search += (urlObj.search ? '&' : '') + originalSearchParams.slice(1);
+           absoluteUrl = urlObj.href;
+        }
+        
+        // 判断是子M3U8还是ts片段
+        if (line.toLowerCase().includes('.m3u8')) {
+          const proxyParams = new URLSearchParams({ url: absoluteUrl });
+          if (forceProxy) proxyParams.set('proxy', 'all');
+          // 递归地将子m3u8的地址也替换为通过worker代理的地址
+          newLines.push(`${currentWorkerUrl.origin}${currentWorkerUrl.pathname}?${proxyParams.toString()}`);
+        } else {
+          // 如果需要代理 (强制或自动判断为国外)
+          if (forceProxy || isForeign(absoluteUrl)) {
+            // 将ts片段地址替换为通过worker代理的地址，并使用ts_url参数
+            newLines.push(`${currentWorkerUrl.origin}${currentWorkerUrl.pathname}?ts_url=${encodeURIComponent(absoluteUrl)}`);
+          } else {
+            // 不需要代理，则保留原始的绝对地址
+            newLines.push(absoluteUrl);
+          }
+        }
+      } 
+      // 3. 其他行 (注释、空行等) 直接保留
+      else {
+        newLines.push(line);
+      }
+    }
+  
+    // 将修改后的行合并成新的M3U8文本
+    const newM3u8Text = newLines.join('\n');
+    const headers = new Headers(response.headers);
+    // 设置正确的MIME类型，让播放器能识别
+    headers.set('Content-Type', 'application/vnd.apple.mpegurl');
+    // 设置CORS头，允许任何来源的网页播放器访问
+    headers.set('Access-Control-Allow-Origin', '*');
+    
+    return new Response(newM3u8Text, { headers });
+  }
+  
+  /**
+   * 处理直接视频文件请求的函数 (如MP4)
+   * @param {Request} request 原始请求
+   * @param {string} originalUrl 视频文件的原始URL
+   * @returns {Promise<Response>} 返回视频数据流
+   */
+  function handleDirectVideoRequest(request, originalUrl) {
+    // 核心：直接作为代理去请求源文件，并将响应流式传回给客户端。
+    // 必须传递原始请求的headers，特别是 `Range` 头，这样才能支持视频播放器的拖动操作！
+    return fetch(originalUrl, { headers: request.headers });
+  }
+  
+  
+  // #############################
+  // #####  辅助函数区域  #####
+  // #############################
+  
+  /**
+   * 判断一个路径是否指向支持的直接视频文件
+   * @param {string} path URL的路径部分
+   * @returns {boolean}
+   */
+  function isDirectVideoFile(path) {
+    return DIRECT_VIDEO_EXTENSIONS.some(ext => path.endsWith(ext));
+  }
+  
+  /**
+   * 判断一个URL是否属于需要代理的国外资源
+   * @param {string} url 完整的URL
+   * @returns {boolean}
+   */
+  function isForeign(url) {
+    try {
+      const hostname = new URL(url).hostname;
+      // 检查URL的主机名是否包含我们定义的任何关键词
+      return FOREIGN_DOMAINS.some(domain => hostname.includes(domain));
+    } catch (e) {
+      // 如果URL格式不正确，默认为非国外资源
+      return false;
+    }
+  }
