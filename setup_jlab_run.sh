@@ -3,22 +3,25 @@ set -Eeuo pipefail
 trap 'echo "[ERROR] exit=$? line=$LINENO: $BASH_COMMAND" >&2' ERR
 
 # ========= 可调参数 =========
-PROFILE="${PROFILE:-1}"                 # 1=Jupyter直连(默认), 2=Jupyter+Nginx, 3=Jupyter+Caddy
+# 只保留直连相关参数
 INDEX_URL="${INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+# 备用镜像
 INDEX_URL="${INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}"
 PORT="${PORT:-8888}"
-FRONT_PORT="${FRONT_PORT:-8080}"
 ROOT_DIR="${ROOT_DIR:-$PWD}"
 EXTRA_JUPYTER_ARGS="${EXTRA_JUPYTER_ARGS:-}"
-USE_SYSTEM_PIP="${USE_SYSTEM_PIP:-0}"   # 1=用系统pip并加 --break-system-packages（不推荐）
+USE_SYSTEM_PIP="${USE_SYSTEM_PIP:-0}"   # 1=用系统pip (不推荐)
+
+# 服务名称 (Systemd 用)
+SERVICE_NAME="jupyter-lab"
 
 # venv 目录
 if [[ $EUID -eq 0 ]]; then DEFAULT_VENV_DIR="/opt/jlab-venv"; else DEFAULT_VENV_DIR="$HOME/.local/jlab-venv"; fi
 VENV_DIR="${VENV_DIR:-$DEFAULT_VENV_DIR}"
 
-log()  { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-die()  { echo "[FAIL] $*" >&2; exit 1; }
+log()  { echo -e "\033[32m[INFO]\033[0m $*"; }
+warn() { echo -e "\033[33m[WARN]\033[0m $*" >&2; }
+die()  { echo -e "\033[31m[FAIL]\033[0m $*" >&2; exit 1; }
 
 detect_pkg_mgr() {
   if command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt; PKG_INSTALL='apt-get update -y && apt-get install -y';
@@ -32,35 +35,21 @@ ensure_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"; }
 
 # ------- pip 安装尝试（带镜像/策略回退）-------
 pip_install_with_mirror_fallback() {
-  # $1... = packages
   local pkgs=("$@")
   local candidates=(
     "$INDEX_URL"
     "https://mirrors.aliyun.com/pypi/simple/"
     "https://pypi.tuna.tsinghua.edu.cn/simple"
     "https://pypi.org/simple"
-    "https://pypi.mirrors.ustc.edu.cn/simple/"
-    "https://pypi.doubanio.com/simple/"
   )
 
-  # 1) wheels-only（不构建），优先稳定与速度
   for idx in "${candidates[@]}"; do
-    log "pip install (wheels only) via: $idx"
-    if "$PIP_BIN" install --only-binary=:all: -i "$idx" "${pkgs[@]}"; then
+    log "Trying pip install via: $idx"
+    if "$PIP_BIN" install --no-cache-dir -i "$idx" "${pkgs[@]}"; then
       EFFECTIVE_INDEX="$idx"
       return 0
     fi
   done
-
-  # 2) 允许构建（若必须），注意：某些镜像可能缺 setuptools；此步尽量最后再试
-  for idx in "${candidates[@]}"; do
-    log "pip install (allow build) via: $idx"
-    if "$PIP_BIN" install -i "$idx" "${pkgs[@]}"; then
-      EFFECTIVE_INDEX="$idx"
-      return 0
-    fi
-  done
-
   return 1
 }
 
@@ -69,218 +58,145 @@ prepare_python_env() {
   ensure_cmd python3
 
   if [[ "$USE_SYSTEM_PIP" == "1" ]]; then
-    log "使用系统 pip（将加 --break-system-packages）"
+    log "使用系统 pip"
     PIP_BREAK="--break-system-packages"
     PYTHON_BIN="$(command -v python3)"
     PIP_BIN="$PYTHON_BIN -m pip"
     JUPYTER_BIN="$(command -v jupyter || true)"
   else
-    log "创建/复用 venv: $VENV_DIR"
+    log "检查/创建 venv: $VENV_DIR"
     mkdir -p "$VENV_DIR"
     if ! python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
       detect_pkg_mgr
-      case "$PKG_MGR" in
-        apt)  bash -lc "$PKG_INSTALL python3-venv";;
-        apk)  bash -lc "$PKG_INSTALL python3 py3-virtualenv";;
-        dnf|yum) bash -lc "$PKG_INSTALL python3";;
-        *) warn "无法自动安装 venv 依赖，请手动确保 'python3 -m venv' 可用";;
-      esac
+      # 尝试自动安装 venv 模块
+      bash -lc "$PKG_INSTALL python3-venv || $PKG_INSTALL python3-virtualenv || true" >/dev/null 2>&1
       python3 -m venv "$VENV_DIR"
     fi
     PYTHON_BIN="$VENV_DIR/bin/python"
     PIP_BIN="$VENV_DIR/bin/pip"
     JUPYTER_BIN="$VENV_DIR/bin/jupyter"
-
-    # 确保 venv 内有 pip
-    "$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    
+    # 修复 venv 里的 pip
+    "$PYTHON_BIN" -m ensurepip >/dev/null 2>&1 || true
   fi
 }
 
-# ========= 安装 Jupyter 到 venv/系统 =========
+# ========= 安装 Jupyter =========
 install_python_stack() {
+  log "升级 pip..."
   if [[ "$USE_SYSTEM_PIP" == "1" ]]; then
-    log "升级 pip（系统环境）"
     $PIP_BIN install -U pip -i "$INDEX_URL" $PIP_BREAK || true
   else
-    log "升级 pip（venv）"
     "$PIP_BIN" install -U pip -i "$INDEX_URL" || true
   fi
 
   local pkgs=(jupyterlab jupyterlab-language-pack-zh-CN jupyterlab-lsp jedi-language-server ipykernel)
-  log "安装 Jupyter 组件（优先 wheels-only，必要时切换镜像）"
+  log "安装 Jupyter 组件..."
   if ! pip_install_with_mirror_fallback "${pkgs[@]}"; then
-    die "安装失败：所有镜像尝试均未成功。你可能在内网需要代理；可设置 HTTPS_PROXY/HTTP_PROXY 环境变量后重试。"
+    die "安装失败，请检查网络或代理设置。"
   fi
-  log "使用镜像: ${EFFECTIVE_INDEX:-unknown}"
 }
 
-# ========= 写 Nginx 配置 =========
-install_nginx_and_config() {
-  [[ $EUID -eq 0 ]] || die "模式2需要 root (安装/写 /etc/nginx)。"
-  detect_pkg_mgr
-  command -v nginx >/dev/null 2>&1 || { log "安装 Nginx..."; bash -lc "$PKG_INSTALL nginx"; }
-  mkdir -p /var/cache/nginx/jupyter_static
-
-  cat >/etc/nginx/conf.d/jupyter.conf <<'NGX'
-map $http_upgrade $connection_upgrade { default upgrade; '' close; }
-
-upstream jupyter_upstream {
-    server 127.0.0.1:__PORT__;
-    keepalive 64;
-}
-
-proxy_cache_path /var/cache/nginx/jupyter_static levels=1:2
-                 keys_zone=jupyter_static:64m max_size=1g inactive=7d
-                 use_temp_path=off;
-
-server {
-    listen __FRONT_PORT__;
-    server_name _;
-
-    client_max_body_size 200m;
-
-    location ~* ^/static/ {
-        proxy_pass http://jupyter_upstream;
-
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection "";
-
-        proxy_buffering on;
-        proxy_buffers 64 64k;
-        proxy_busy_buffers_size 256k;
-
-        proxy_cache jupyter_static;
-        proxy_cache_valid 200 301 302 12h;
-        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
-        add_header X-Cache $upstream_cache_status always;
-
-        expires 30d;
-        add_header Cache-Control "public, max-age=2592000, immutable";
-    }
-
-    location ~ ^/api/kernels/[^/]+/channels {
-        proxy_pass http://jupyter_upstream;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade           $http_upgrade;
-        proxy_set_header Connection        $connection_upgrade;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 7d; proxy_send_timeout 7d; proxy_buffering off;
-    }
-
-    location ~ ^/terminals/websocket/? {
-        proxy_pass http://jupyter_upstream;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade           $http_upgrade;
-        proxy_set_header Connection        $connection_upgrade;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 7d; proxy_send_timeout 7d; proxy_buffering off;
-    }
-
-    location / {
-        proxy_pass http://jupyter_upstream;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection "";
-        proxy_buffering on;
-        proxy_buffers 64 64k;
-        proxy_busy_buffers_size 256k;
-        proxy_read_timeout 86400; proxy_send_timeout 86400;
-    }
-}
-NGX
-  # 填入端口
-  sed -i "s/__PORT__/$PORT/g; s/__FRONT_PORT__/$FRONT_PORT/g" /etc/nginx/conf.d/jupyter.conf
-
-  nginx -t
-  systemctl enable --now nginx 2>/dev/null || service nginx start || nginx || true
-  systemctl reload nginx 2>/dev/null || nginx -s reload || service nginx reload || true
-}
-
-# ========= 写 Caddy 配置 =========
-install_caddy_and_config() {
-  [[ $EUID -eq 0 ]] || die "模式3需要 root (安装/写 /etc/caddy)。"
-  detect_pkg_mgr
-  command -v caddy >/dev/null 2>&1 || { log "安装 Caddy..."; bash -lc "$PKG_INSTALL caddy" || die "安装 Caddy 失败"; }
-
-  cat >/etc/caddy/Caddyfile <<'CADDY'
-:__FRONT_PORT__ {
-    @static path /static/*
-    header @static Cache-Control "public, max-age=2592000, immutable"
-
-    reverse_proxy 127.0.0.1:__PORT__ {
-        header_up Host {host}
-        header_up X-Real-IP {remote}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto http
-        flush_interval -1
-        transport http { versions 1.1; keepalive 30s }
-    }
-}
-CADDY
-  sed -i "s/__PORT__/$PORT/g; s/__FRONT_PORT__/$FRONT_PORT/g" /etc/caddy/Caddyfile
-
-  systemctl enable --now caddy 2>/dev/null || true
-  caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl restart caddy || true
-}
-
-# ========= 启动 Jupyter =========
-start_jupyter() {
-  local bind_ip="$1"
-  local extra=()
-  if [[ "$bind_ip" == "127.0.0.1" ]]; then extra+=(--ServerApp.trust_xheaders=True); fi
-
-  log "启动 JupyterLab（模式=${PROFILE}，端口=${PORT}，目录=${ROOT_DIR}）"
-  # 若 jupyter 可执行不存在（极少数环境），退回模块方式
+# ========= 生成启动命令字符串 =========
+get_start_cmd() {
+  # 构造启动参数
+  local cmd_str=""
+  
+  # 判断是用 venv 的 jupyter 还是 python -m jupyter
   if [[ -x "$JUPYTER_BIN" ]]; then
-    exec "$JUPYTER_BIN" lab \
-      --allow-root --ip="$bind_ip" --port="$PORT" \
-      --ServerApp.root_dir="$ROOT_DIR" \
-      --ServerApp.token='' --ServerApp.password='' \
-      --ServerApp.tornado_settings="{'compress_response': False, 'static_cache_max_age': 2592000}" \
-      --ServerApp.iopub_data_rate_limit=1000000000 \
-      --ServerApp.rate_limit_window=3.0 \
-      --ServerApp.websocket_max_message_size=209715200 \
-      "${extra[@]}" $EXTRA_JUPYTER_ARGS
+    cmd_str="$JUPYTER_BIN lab"
   else
-    exec "$PYTHON_BIN" -m jupyter lab \
-      --allow-root --ip="$bind_ip" --port="$PORT" \
-      --ServerApp.root_dir="$ROOT_DIR" \
-      --ServerApp.token='' --ServerApp.password='' \
-      --ServerApp.tornado_settings="{'compress_response': False, 'static_cache_max_age': 2592000}" \
-      --ServerApp.iopub_data_rate_limit=1000000000 \
-      --ServerApp.rate_limit_window=3.0 \
-      --ServerApp.websocket_max_message_size=209715200 \
-      "${extra[@]}" $EXTRA_JUPYTER_ARGS
+    cmd_str="$PYTHON_BIN -m jupyter lab"
+  fi
+
+  # 追加参数
+  # 注意：这里为了安全，建议以后加上 Token，但根据你原脚本保留空密码设置
+  cmd_str="$cmd_str --allow-root --ip=0.0.0.0 --port=$PORT"
+  cmd_str="$cmd_str --ServerApp.root_dir=$ROOT_DIR"
+  cmd_str="$cmd_str --ServerApp.token='' --ServerApp.password=''"
+  cmd_str="$cmd_str --ServerApp.tornado_settings={'compress_response':False,'static_cache_max_age':2592000}"
+  cmd_str="$cmd_str --no-browser"
+  cmd_str="$cmd_str $EXTRA_JUPYTER_ARGS"
+  
+  echo "$cmd_str"
+}
+
+# ========= 后台运行逻辑 =========
+setup_background_service() {
+  local start_cmd
+  start_cmd=$(get_start_cmd)
+
+  if [[ $EUID -eq 0 ]]; then
+    # ---------------- Root 用户：使用 Systemd (推荐) ----------------
+    log "当前为 Root 用户，正在创建 Systemd 服务..."
+    
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    
+    cat > "$service_file" <<EOF
+[Unit]
+Description=JupyterLab Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$ROOT_DIR
+ExecStart=$start_cmd
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    log "Systemd 服务文件已创建: $service_file"
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+    
+    log "=============================================="
+    log "JupyterLab 已通过 Systemd 在后台启动！"
+    log "访问地址: http://服务器IP:$PORT"
+    log "----------------------------------------------"
+    log "查看状态: systemctl status ${SERVICE_NAME}"
+    log "停止服务: systemctl stop ${SERVICE_NAME}"
+    log "查看日志: journalctl -u ${SERVICE_NAME} -f"
+    log "=============================================="
+
+  else
+    # ---------------- 普通用户：使用 nohup ----------------
+    log "当前为普通用户，使用 nohup 在后台运行..."
+    
+    local log_file="$HOME/jupyter_run.log"
+    
+    # 杀掉旧进程（如果有）
+    pkill -f "jupyter-lab" || true
+    
+    # 后台运行
+    nohup $start_cmd > "$log_file" 2>&1 &
+    
+    log "=============================================="
+    log "JupyterLab 已通过 nohup 在后台启动！"
+    log "访问地址: http://服务器IP:$PORT"
+    log "----------------------------------------------"
+    log "日志文件: $log_file"
+    log "关闭方法: pkill -f jupyter-lab"
+    log "=============================================="
   fi
 }
 
 # ========= 主流程 =========
 main() {
-  [[ $PROFILE =~ ^[123]$ ]] || die "不支持的 PROFILE=${PROFILE}，请用 1/2/3"
-
-  # 1) Python 环境
+  log "开始安装/配置 JupyterLab (纯净后台模式)..."
+  
+  # 1) 环境准备
   prepare_python_env
+  
+  # 2) 安装核心包
   install_python_stack
 
-  # 2) 反代（按模式）
-  case "$PROFILE" in
-    1) log "模式1：仅 Jupyter（内网优化，直连 0.0.0.0:${PORT})"; start_jupyter "0.0.0.0" ;;
-    2) log "模式2：Jupyter + Nginx（:${FRONT_PORT} → 127.0.0.1:${PORT})"; install_nginx_and_config; start_jupyter "127.0.0.1" ;;
-    3) log "模式3：Jupyter + Caddy（:${FRONT_PORT} → 127.0.0.1:${PORT})"; install_caddy_and_config; start_jupyter "127.0.0.1" ;;
-  esac
+  # 3) 配置并启动后台服务
+  setup_background_service
 }
 
 main "$@"
