@@ -28,6 +28,8 @@
 
 `bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/main/x-ui.sh 2> /dev/null)`
 
+`bash <(wget -qO- https://raw.githubusercontent.com/ccqwerty123/ccqwerty123/refs/heads/main/keepalive.sh 2> /dev/null)`  服务器定时清理，减少读写
+
 x-ui重启
 
 
