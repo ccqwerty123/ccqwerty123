@@ -1,18 +1,19 @@
 #!/bin/bash
 
 #==============================================================================
-# Linux 系统工具箱多合一管理脚本 (综合优化版)
+# Linux 系统工具箱多合一管理脚本 (综合优化版 v2.1)
 # 功能:
 #   1. 系统信息检测 (OS, IP)
 #   2. Swap空间与内核参数管理
-#   3. 系统极限精简与优化
+#   3. 系统极致优化（通用版）
 #   4. DNS配置管理
 #   5. 计划任务管理 (自动识别 Cron 或 Systemd Timer)
-#   6. x-ui 和 WARP 极致优化 (包含完整自动化配置)
+#   6. x-ui 和 WARP 极致优化（专用版，包含内存运行模式）
 # 特性:
 #   - 自动判断 Cron/Systemd Timer 双模调度
+#   - 优先使用 Cron 时自动禁用冲突 Timer
 #   - LXC 容器兼容性优化
-#   - 完善的变量转义和错误处理
+#   - 完善的 resolv.conf 解锁检测
 #   - 保留 systemd-tmpfiles-clean.timer（防止临时文件填满磁盘）
 #==============================================================================
 
@@ -80,6 +81,79 @@ validate_input() {
             echo -e "${RED}无效输入，请输入 $min 到 $max 之间的整数${PLAIN}" >&2
         fi
     done
+}
+
+# 解锁 resolv.conf（带检测）
+unlock_resolv_conf() {
+    local file="/etc/resolv.conf"
+    
+    # 检查命令是否存在
+    if ! command -v lsattr &>/dev/null || ! command -v chattr &>/dev/null; then
+        return 0  # 命令不存在，无需处理
+    fi
+    
+    # 检查文件是否存在
+    if [ ! -e "$file" ]; then
+        return 0
+    fi
+    
+    # 检查是否有 immutable 属性
+    if lsattr "$file" 2>/dev/null | grep -q -- '-i-'; then
+        echo -e "  ${YELLOW}检测到 resolv.conf 被锁定，正在解锁...${PLAIN}"
+        if chattr -i "$file" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${PLAIN} 已解锁 resolv.conf"
+            return 0
+        else
+            echo -e "  ${RED}✗${PLAIN} 解锁失败"
+            return 1
+        fi
+    fi
+    
+    return 0  # 未锁定
+}
+
+# 禁用冲突的 Systemd Timer（仅当使用 Cron 时）
+disable_conflict_timers() {
+    if [ "$HAS_CRON" != true ]; then
+        echo -e "  ${YELLOW}○${PLAIN} 未使用 Cron，保留 Systemd Timer"
+        return 0
+    fi
+    
+    echo -e "  检测到 Cron 可用，禁用冲突的 Systemd Timer..."
+    
+    # 要禁用的 Timer 列表（不包括 systemd-tmpfiles-clean.timer）
+    local timers_to_disable=(
+        "apt-daily.timer"
+        "apt-daily-upgrade.timer"
+        "man-db.timer"
+        "e2scrub_all.timer"
+        "e2scrub_reap.service"
+        "fstrim.timer"
+        "logrotate.timer"
+        "dpkg-db-backup.timer"
+        "plocate-updatedb.timer"
+    )
+    
+    local disabled_count=0
+    
+    for timer in "${timers_to_disable[@]}"; do
+        if systemctl is-enabled "$timer" &>/dev/null; then
+            systemctl disable --now "$timer" &>/dev/null
+            ((disabled_count++))
+            echo -e "    ${GREEN}✓${PLAIN} 已禁用: $timer"
+        fi
+    done
+    
+    if [ "$disabled_count" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${PLAIN} 无需禁用的 Timer"
+    else
+        echo -e "  ${GREEN}✓${PLAIN} 共禁用 $disabled_count 个 Timer"
+    fi
+    
+    # 提示保留的重要 Timer
+    if systemctl is-enabled "systemd-tmpfiles-clean.timer" &>/dev/null; then
+        echo -e "  ${CYAN}ℹ${PLAIN} 保留 systemd-tmpfiles-clean.timer（防止临时文件堆积）"
+    fi
 }
 
 # 安全地添加 Cron 任务（防止重复）
@@ -465,10 +539,10 @@ manage_swap_and_kernel() {
 }
 
 #==============================================================================
-# 功能模块 3: 系统极限精简
+# 功能模块 3: 系统极致优化（通用版）
 #==============================================================================
 
-system_streamline() {
+system_extreme_optimize() {
     local start_disk_usage end_disk_usage space_freed
     local actions_taken=()
 
@@ -476,87 +550,210 @@ system_streamline() {
 
     log_action() { actions_taken+=("$1"); }
 
-    disable_service_safe() {
-        local service_name="$1"
-        if systemctl list-unit-files 2>/dev/null | grep -q "^${service_name}"; then
-            systemctl stop "${service_name}" >/dev/null 2>&1
-            systemctl disable "${service_name}" >/dev/null 2>&1 && log_action "禁用服务: ${service_name}"
-        fi
-    }
-
-    echo -e "\n${YELLOW}=========== 系统极限精简开始 ===========${PLAIN}"
-    echo -e "${RED}警告: 此操作将删除文档、清理缓存并禁用非必要服务${PLAIN}"
+    echo -e "\n${CYAN}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
+    echo -e "${CYAN}║              系统极致优化（通用版）                          ║${PLAIN}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${PLAIN}"
+    echo ""
+    echo "此优化将执行以下操作:"
+    echo ""
+    echo "  [1] 关闭 Swap（减少磁盘写入）"
+    echo "  [2] 禁用冲突的 Systemd Timer（如果使用 Cron）"
+    echo "  [3] 配置日志为内存模式"
+    echo "  [4] 解锁 resolv.conf 并配置 DNS"
+    echo "  [5] 清理系统缓存和文档"
+    echo "  [6] 禁用非核心服务"
+    echo "  [7] 配置通用计划任务"
+    echo ""
+    echo -e "${RED}警告: 此操作会删除系统文档、清理缓存！${PLAIN}"
     echo ""
 
-    # 1. APT 清理
+    read -rp "确认执行系统极致优化? (y/N): " confirm
+    [[ ! "$confirm" =~ ^[yY]$ ]] && echo "已取消" && return
+
+    echo ""
+
+    # ==================== [1] 关闭 Swap ====================
+    echo -e "${GREEN}[1/7] 关闭 Swap...${PLAIN}"
+    
+    if swapon --show 2>/dev/null | grep -q .; then
+        swapoff -a 2>/dev/null
+        sed -i '/swap/s/^/#/' /etc/fstab 2>/dev/null
+        # 删除 swapfile
+        for sf in /swapfile /swap.img; do
+            [ -f "$sf" ] && rm -f "$sf" 2>/dev/null
+        done
+        log_action "关闭并清理 Swap"
+        echo -e "  ${GREEN}✓${PLAIN} Swap 已关闭"
+    else
+        echo -e "  ${YELLOW}○${PLAIN} Swap 未启用，跳过"
+    fi
+
+    # ==================== [2] 禁用冲突 Timer ====================
+    echo -e "\n${GREEN}[2/7] 处理调度系统冲突...${PLAIN}"
+    
+    disable_conflict_timers
+    log_action "禁用冲突的 Systemd Timer"
+
+    # ==================== [3] 日志内存化 ====================
+    echo -e "\n${GREEN}[3/7] 配置日志内存模式...${PLAIN}"
+
+    if [ -f /etc/systemd/journald.conf ]; then
+        # 备份原配置
+        cp -f /etc/systemd/journald.conf /etc/systemd/journald.conf.bak 2>/dev/null
+        
+        # 删除旧配置再添加新配置
+        sed -i '/^Storage=/d; /^RuntimeMaxUse=/d; /^SystemMaxUse=/d' /etc/systemd/journald.conf
+        
+        cat >> /etc/systemd/journald.conf <<EOF
+
+# 极致优化配置 (自动生成)
+Storage=volatile
+RuntimeMaxUse=16M
+EOF
+
+        systemctl restart systemd-journald >/dev/null 2>&1
+        log_action "日志配置为内存模式 (最大 16M)"
+        echo -e "  ${GREEN}✓${PLAIN} 日志已配置为内存模式"
+    else
+        echo -e "  ${YELLOW}○${PLAIN} 未找到 journald.conf，跳过"
+    fi
+
+    # ==================== [4] 解锁 resolv.conf 并配置 DNS ====================
+    echo -e "\n${GREEN}[4/7] 处理 DNS 配置...${PLAIN}"
+    
+    unlock_resolv_conf
+    
+    echo ""
+    echo "  是否设置 DNS？"
+    echo "  1) 通用 DNS (Cloudflare + Google)"
+    echo "  2) DNS64 (仅 IPv6 网络)"
+    echo "  3) 阿里 DNS"
+    echo "  4) 跳过"
+    read -rp "  选择 [1-4]: " dns_choice
+    
+    case $dns_choice in
+        1)
+            echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 2606:4700:4700::1111\nnameserver 2001:4860:4860::8888" > /etc/resolv.conf
+            log_action "设置通用 DNS"
+            echo -e "  ${GREEN}✓${PLAIN} DNS 已设置"
+            ;;
+        2)
+            echo -e "nameserver 2606:4700:4700::64\nnameserver 2001:4860:4860::64" > /etc/resolv.conf
+            log_action "设置 DNS64"
+            echo -e "  ${GREEN}✓${PLAIN} DNS64 已设置"
+            ;;
+        3)
+            echo -e "nameserver 223.5.5.5\nnameserver 223.6.6.6\nnameserver 2400:3200::1" > /etc/resolv.conf
+            log_action "设置阿里 DNS"
+            echo -e "  ${GREEN}✓${PLAIN} 阿里 DNS 已设置"
+            ;;
+        *)
+            echo -e "  ${YELLOW}○${PLAIN} 跳过 DNS 设置"
+            ;;
+    esac
+
+    # ==================== [5] 清理系统缓存和文档 ====================
+    echo -e "\n${GREEN}[5/7] 清理系统缓存和文档...${PLAIN}"
+
+    # APT 清理
     if command -v apt-get &>/dev/null; then
-        echo "  → 清理 APT 缓存..."
         apt-get clean >/dev/null 2>&1
         apt-get autoremove --purge -y >/dev/null 2>&1
         rm -rf /var/lib/apt/lists/* 2>/dev/null
-        log_action "清理 APT 缓存和遗留包"
+        log_action "清理 APT 缓存"
+        echo -e "  ${GREEN}✓${PLAIN} APT 缓存已清理"
     fi
 
-    # 2. 清理系统文档
-    echo "  → 清理系统文档..."
+    # 系统文档
     if [ -d "/usr/share/doc" ]; then
-        rm -rf /usr/share/doc/* 2>/dev/null && log_action "移除 /usr/share/doc"
+        rm -rf /usr/share/doc/* 2>/dev/null
+        log_action "移除 /usr/share/doc"
     fi
     if [ -d "/usr/share/man" ]; then
-        rm -rf /usr/share/man/* 2>/dev/null && log_action "移除 /usr/share/man"
+        rm -rf /usr/share/man/* 2>/dev/null
+        log_action "移除 /usr/share/man"
     fi
     if [ -d "/usr/share/locale" ]; then
-        # 保留英文和中文
         find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
             ! -name 'en*' ! -name 'zh*' -exec rm -rf {} \; 2>/dev/null
         log_action "清理多余语言包"
     fi
+    echo -e "  ${GREEN}✓${PLAIN} 系统文档已清理"
 
-    # 3. 清理日志
-    echo "  → 清理系统日志..."
+    # 日志清理
     journalctl --rotate >/dev/null 2>&1
     journalctl --vacuum-time=1s >/dev/null 2>&1
     find /var/log -type f \( -name "*.gz" -o -name "*.[0-9]" -o -name "*.old" \) -delete 2>/dev/null
-    # 清空但保留文件
     find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; 2>/dev/null
     log_action "清理系统日志"
+    echo -e "  ${GREEN}✓${PLAIN} 系统日志已清理"
 
-    # 4. 禁用非核心服务（保留 systemd-tmpfiles-clean.timer）
-    echo "  → 禁用非核心服务..."
-    local services_to_disable=(
-        "apt-daily.timer"
-        "apt-daily-upgrade.timer"
-        "unattended-upgrades.service"
-        "man-db.timer"
-        "e2scrub_reap.service"
-        "e2scrub_all.timer"
-        "fstrim.timer"
-    )
-    # 注意：故意不禁用 systemd-tmpfiles-clean.timer，防止临时文件填满磁盘
-
-    for service in "${services_to_disable[@]}"; do
-        disable_service_safe "$service"
-    done
-
-    # 5. 清理临时文件
-    echo "  → 清理临时文件..."
+    # 临时文件
     rm -rf /tmp/* /var/tmp/* 2>/dev/null
     log_action "清理临时文件"
+    echo -e "  ${GREEN}✓${PLAIN} 临时文件已清理"
 
-    # 计算释放空间
+    # ==================== [6] 禁用非核心服务 ====================
+    echo -e "\n${GREEN}[6/7] 禁用非核心服务...${PLAIN}"
+
+    local services_to_disable=(
+        "unattended-upgrades.service"
+        "packagekit.service"
+        "ModemManager.service"
+        "accounts-daemon.service"
+    )
+
+    for service in "${services_to_disable[@]}"; do
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${service}"; then
+            systemctl stop "${service}" >/dev/null 2>&1
+            systemctl disable "${service}" >/dev/null 2>&1
+            echo -e "  ${GREEN}✓${PLAIN} 禁用: ${service}"
+            log_action "禁用服务: ${service}"
+        fi
+    done
+
+    # ==================== [7] 配置通用计划任务 ====================
+    echo -e "\n${GREEN}[7/7] 配置通用计划任务...${PLAIN}"
+
+    # 每天凌晨4点清理内存
+    add_smart_task "daily" "04:00" "sync; echo 3 > /proc/sys/vm/drop_caches" "opt_memory_clean"
+
+    # 开机修复 DNS（如果用户选择了 DNS）
+    if [[ "$dns_choice" =~ ^[1-3]$ ]]; then
+        local dns_cmd=""
+        case $dns_choice in
+            1) dns_cmd="echo -e 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 2606:4700:4700::1111\nnameserver 2001:4860:4860::8888' > /etc/resolv.conf" ;;
+            2) dns_cmd="echo -e 'nameserver 2606:4700:4700::64\nnameserver 2001:4860:4860::64' > /etc/resolv.conf" ;;
+            3) dns_cmd="echo -e 'nameserver 223.5.5.5\nnameserver 223.6.6.6\nnameserver 2400:3200::1' > /etc/resolv.conf" ;;
+        esac
+        add_smart_task "reboot" "" "$dns_cmd" "opt_dns_boot"
+    fi
+
+    # ==================== 完成总结 ====================
     sync
     end_disk_usage=$(df -k / 2>/dev/null | awk 'NR==2 {print $3}')
     space_freed=$(( (start_disk_usage - end_disk_usage) / 1024 ))
     [ "$space_freed" -lt 0 ] && space_freed=0
 
-    echo -e "\n${GREEN}=========== 精简完成 ===========${PLAIN}"
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
+    echo -e "${GREEN}║                  系统极致优化完成！                          ║${PLAIN}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${PLAIN}"
+    echo ""
     echo "执行的操作:"
     for action in "${actions_taken[@]}"; do
         echo -e "  ${GREEN}✓${PLAIN} ${action}"
     done
     echo ""
     echo -e "释放空间: ${GREEN}${space_freed} MB${PLAIN}"
-    echo "=================================="
+    echo ""
+
+    read -rp "是否立即重启系统? (y/N): " reboot_opt
+    if [[ "$reboot_opt" =~ ^[yY]$ ]]; then
+        echo "正在重启..."
+        sleep 2
+        reboot
+    fi
 }
 
 #==============================================================================
@@ -572,13 +769,8 @@ DNS_ALIYUN="nameserver 223.5.5.5\nnameserver 223.6.6.6\nnameserver 2400:3200::1\
 set_dns() {
     local dns_content="$1"
 
-    # 检查是否有 immutable 属性
-    if command -v lsattr &>/dev/null && command -v chattr &>/dev/null; then
-        if lsattr /etc/resolv.conf 2>/dev/null | grep -q 'i'; then
-            echo -e "${YELLOW}检测到文件被锁定，正在解锁...${PLAIN}"
-            chattr -i /etc/resolv.conf 2>/dev/null
-        fi
-    fi
+    # 先解锁
+    unlock_resolv_conf
 
     # 检查 resolv.conf 是否为符号链接
     if [ -L /etc/resolv.conf ]; then
@@ -622,11 +814,14 @@ manage_dns() {
         echo "4) 阿里 DNS"
         echo "5) 自定义 DNS"
         echo ""
-        echo "自动化:"
-        echo "6) 添加开机自动设置 DNS 任务"
-        echo "7) 删除开机自动设置 DNS 任务"
+        echo "工具:"
+        echo "6) 解锁 resolv.conf"
         echo ""
-        echo "8) 返回主菜单"
+        echo "自动化:"
+        echo "7) 添加开机自动设置 DNS 任务"
+        echo "8) 删除开机自动设置 DNS 任务"
+        echo ""
+        echo "9) 返回主菜单"
         echo ""
         read -rp "选择: " dns_choice
 
@@ -648,6 +843,9 @@ manage_dns() {
                 fi
                 ;;
             6)
+                unlock_resolv_conf
+                ;;
+            7)
                 echo "选择要自动设置的 DNS:"
                 echo "1) 通用 DNS  2) DNS64  3) 台湾 DNS  4) 阿里 DNS"
                 read -rp "选择: " auto_dns_choice
@@ -659,12 +857,14 @@ manage_dns() {
                     4) dns_cmd="echo -e '$DNS_ALIYUN' > /etc/resolv.conf" ;;
                     *) echo "无效选择"; continue ;;
                 esac
+                # 先解锁
+                unlock_resolv_conf
                 add_smart_task "reboot" "" "$dns_cmd" "auto_dns_fix"
                 ;;
-            7)
+            8)
                 remove_smart_task "auto_dns_fix"
                 ;;
-            8) break ;;
+            9) break ;;
             *) echo -e "${RED}无效选项${PLAIN}" ;;
         esac
         
@@ -785,7 +985,7 @@ manage_crontab() {
 }
 
 #==============================================================================
-# 功能模块 6: x-ui 和 WARP 极致优化
+# 功能模块 6: x-ui 和 WARP 极致优化（专用版）
 #==============================================================================
 
 detect_xui() {
@@ -996,29 +1196,85 @@ EOF
     chmod +x "${SCRIPT_DIR}/check_memory.sh"
 }
 
+# 执行通用系统优化（供 x-ui/WARP 专用版调用）
+run_base_system_optimize() {
+    echo -e "\n${GREEN}[基础] 执行通用系统优化...${PLAIN}"
+    
+    # 关闭 Swap
+    echo -e "  → 关闭 Swap..."
+    swapoff -a 2>/dev/null
+    sed -i '/swap/s/^/#/' /etc/fstab 2>/dev/null
+    for sf in /swapfile /swap.img; do
+        [ -f "$sf" ] && rm -f "$sf" 2>/dev/null
+    done
+    
+    # 禁用冲突 Timer
+    echo -e "  → 处理调度系统..."
+    disable_conflict_timers
+    
+    # 日志内存化
+    echo -e "  → 配置日志内存模式..."
+    if [ -f /etc/systemd/journald.conf ]; then
+        sed -i '/^Storage=/d; /^RuntimeMaxUse=/d; /^SystemMaxUse=/d' /etc/systemd/journald.conf
+        cat >> /etc/systemd/journald.conf <<EOF
+
+# 极致优化配置 (自动生成)
+Storage=volatile
+RuntimeMaxUse=16M
+EOF
+        systemctl restart systemd-journald >/dev/null 2>&1
+    fi
+    
+    # 解锁 resolv.conf
+    echo -e "  → 解锁 resolv.conf..."
+    unlock_resolv_conf
+    
+    # 清理缓存
+    echo -e "  → 清理系统缓存..."
+    if command -v apt-get &>/dev/null; then
+        apt-get clean >/dev/null 2>&1
+        apt-get autoremove --purge -y >/dev/null 2>&1
+        rm -rf /var/lib/apt/lists/* 2>/dev/null
+    fi
+    
+    rm -rf /usr/share/doc/* /usr/share/man/* 2>/dev/null
+    find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
+        ! -name 'en*' ! -name 'zh*' -exec rm -rf {} \; 2>/dev/null
+    
+    journalctl --rotate >/dev/null 2>&1
+    journalctl --vacuum-time=1s >/dev/null 2>&1
+    rm -rf /tmp/* /var/tmp/* 2>/dev/null
+    
+    echo -e "  ${GREEN}✓${PLAIN} 基础系统优化完成"
+}
+
 optimize_xui_warp() {
     echo -e "\n${CYAN}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
-    echo -e "${CYAN}║           x-ui 和 WARP 极致优化 (智能适配版)                 ║${PLAIN}"
+    echo -e "${CYAN}║        x-ui 和 WARP 极致优化（专用版 - 内存运行模式）        ║${PLAIN}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${PLAIN}"
     echo ""
     echo "此模式将自动完成以下操作:"
     echo ""
-    echo -e "  ${GREEN}[系统优化]${PLAIN}"
-    echo "  ├─ 关闭 Swap (防止磁盘过度写入)"
-    echo "  ├─ 配置日志为内存模式 (journald volatile)"
-    echo "  └─ WARP 日志重定向到黑洞"
+    echo -e "  ${GREEN}[通用系统优化]${PLAIN} (与选项3相同)"
+    echo "  ├─ 关闭 Swap"
+    echo "  ├─ 禁用冲突 Timer"
+    echo "  ├─ 日志内存化"
+    echo "  ├─ 解锁 resolv.conf"
+    echo "  └─ 清理系统缓存"
     echo ""
-    echo -e "  ${GREEN}[x-ui 优化]${PLAIN}"
+    echo -e "  ${GREEN}[x-ui 专用优化]${PLAIN}"
     echo "  ├─ 数据库迁移到内存 (/dev/shm)"
     echo "  └─ 创建数据库备份用于自动恢复"
     echo ""
+    echo -e "  ${GREEN}[WARP 专用优化]${PLAIN}"
+    echo "  └─ 日志重定向到黑洞"
+    echo ""
     echo -e "  ${GREEN}[自动化脚本]${PLAIN}"
-    echo "  ├─ reset_ram_state.sh (每日清洗 + 开机恢复)"
+    echo "  ├─ reset_ram_state.sh (重启恢复脚本)"
     echo "  └─ check_memory.sh (内存看门狗)"
     echo ""
-    echo -e "  ${GREEN}[计划任务]${PLAIN} (自动添加，防止重复)"
-    echo "  ├─ 开机: 执行清洗脚本"
-    echo "  ├─ 开机: 修改 DNS"
+    echo -e "  ${GREEN}[计划任务]${PLAIN}"
+    echo "  ├─ 开机: 执行恢复脚本 + DNS 修复"
     echo "  ├─ 每天 04:00: 执行清洗"
     echo "  └─ 每 10 分钟: 内存检查"
     echo ""
@@ -1027,7 +1283,7 @@ optimize_xui_warp() {
     [[ ! "$confirm" =~ ^[yY]$ ]] && echo "已取消" && return
 
     echo ""
-    echo -e "${GREEN}[1/7] 检测软件环境...${PLAIN}"
+    echo -e "${GREEN}[1/8] 检测软件环境...${PLAIN}"
 
     local has_xui=false
     local has_warp=false
@@ -1051,54 +1307,45 @@ optimize_xui_warp() {
         echo -e "  ${YELLOW}○${PLAIN} 未检测到 WARP"
     fi
 
-    # ==================== 关闭 Swap ====================
-    echo -e "\n${GREEN}[2/7] 关闭 Swap...${PLAIN}"
-    swapoff -a 2>/dev/null
-    sed -i '/swap/s/^/#/' /etc/fstab 2>/dev/null
-    # 尝试删除 swapfile
-    for sf in /swapfile /swap.img; do
-        [ -f "$sf" ] && rm -f "$sf" 2>/dev/null
-    done
-    echo -e "  ${GREEN}✓${PLAIN} Swap 已关闭"
-
-    # ==================== 日志内存化 ====================
-    echo -e "\n${GREEN}[3/7] 配置日志内存模式...${PLAIN}"
-
-    if [ -f /etc/systemd/journald.conf ]; then
-        # 备份原配置
-        cp -f /etc/systemd/journald.conf /etc/systemd/journald.conf.bak 2>/dev/null
-        
-        # 使用 sed 安全修改（先删除旧配置再添加新配置）
-        sed -i '/^Storage=/d; /^RuntimeMaxUse=/d; /^SystemMaxUse=/d' /etc/systemd/journald.conf
-        
-        # 添加新配置
-        cat >> /etc/systemd/journald.conf <<EOF
-
-# 优化配置 (自动生成)
-Storage=volatile
-RuntimeMaxUse=16M
-EOF
-
-        systemctl restart systemd-journald >/dev/null 2>&1
-        echo -e "  ${GREEN}✓${PLAIN} 日志已配置为内存模式 (最大 16M)"
-    else
-        echo -e "  ${YELLOW}○${PLAIN} 未找到 journald.conf，跳过"
+    # 如果都没检测到，询问是否继续
+    if [ "$has_xui" = false ] && [ "$has_warp" = false ]; then
+        echo ""
+        echo -e "${YELLOW}未检测到 x-ui 或 WARP，此优化主要针对这些软件。${PLAIN}"
+        read -rp "是否继续执行通用系统优化? (y/N): " continue_opt
+        if [[ ! "$continue_opt" =~ ^[yY]$ ]]; then
+            echo "已取消"
+            return
+        fi
     fi
 
-    # WARP 日志黑洞
+    # ==================== [2/8] 通用系统优化 ====================
+    echo -e "\n${GREEN}[2/8] 执行通用系统优化...${PLAIN}"
+    run_base_system_optimize
+
+    # ==================== [3/8] 配置 DNS ====================
+    echo -e "\n${GREEN}[3/8] 配置 DNS...${PLAIN}"
+    echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 2606:4700:4700::1111\nnameserver 2001:4860:4860::8888" > /etc/resolv.conf
+    echo -e "  ${GREEN}✓${PLAIN} DNS 已设置为通用 DNS"
+
+    # ==================== [4/8] WARP 日志黑洞 ====================
+    echo -e "\n${GREEN}[4/8] 处理 WARP 日志...${PLAIN}"
+    
     if [ "$has_warp" = true ]; then
-        # 停止可能正在写日志的进程
         pkill -f "WARP-UP.sh" 2>/dev/null
         
         if [ -d "/root/warpip" ]; then
             rm -f /root/warpip/warp_log.txt 2>/dev/null
             ln -sf /dev/null /root/warpip/warp_log.txt 2>/dev/null
             echo -e "  ${GREEN}✓${PLAIN} WARP 日志已重定向到黑洞"
+        else
+            echo -e "  ${YELLOW}○${PLAIN} 未找到 WARP 日志目录"
         fi
+    else
+        echo -e "  ${YELLOW}○${PLAIN} 跳过 (未检测到 WARP)"
     fi
 
-    # ==================== x-ui 数据库内存化 ====================
-    echo -e "\n${GREEN}[4/7] 迁移 x-ui 数据库...${PLAIN}"
+    # ==================== [5/8] x-ui 数据库内存化 ====================
+    echo -e "\n${GREEN}[5/8] 迁移 x-ui 数据库...${PLAIN}"
 
     if [ "$has_xui" = true ] && [ -n "$xui_db_path" ]; then
         local db_name db_backup_path
@@ -1130,8 +1377,8 @@ EOF
         echo -e "  ${YELLOW}○${PLAIN} 跳过 (未检测到 x-ui 或数据库)"
     fi
 
-    # ==================== 生成脚本 ====================
-    echo -e "\n${GREEN}[5/7] 生成自动化脚本...${PLAIN}"
+    # ==================== [6/8] 生成脚本 ====================
+    echo -e "\n${GREEN}[6/8] 生成自动化脚本...${PLAIN}"
 
     generate_reset_script "$has_xui" "$has_warp" "$xui_db_path"
     echo -e "  ${GREEN}✓${PLAIN} 创建 ${SCRIPT_DIR}/reset_ram_state.sh"
@@ -1139,19 +1386,19 @@ EOF
     generate_watchdog_script 88
     echo -e "  ${GREEN}✓${PLAIN} 创建 ${SCRIPT_DIR}/check_memory.sh"
 
-    # ==================== 配置计划任务 ====================
-    echo -e "\n${GREEN}[6/7] 配置计划任务...${PLAIN}"
+    # ==================== [7/8] 配置计划任务 ====================
+    echo -e "\n${GREEN}[7/8] 配置计划任务...${PLAIN}"
 
     # 备份当前任务
     if [ "$HAS_CRON" = true ]; then
         crontab -l > "/root/crontab_backup_$(date +%Y%m%d%H%M%S).txt" 2>/dev/null
     fi
 
-    # 任务 1: 开机执行清洗脚本
+    # 任务 1: 开机执行恢复脚本
     add_smart_task "reboot" "" "${SCRIPT_DIR}/reset_ram_state.sh" "opt_reset_boot"
 
     # 任务 2: 开机修改 DNS
-    add_smart_task "reboot" "" "echo -e '$DNS_COMMON' > /etc/resolv.conf" "opt_dns_boot"
+    add_smart_task "reboot" "" "echo -e 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 2606:4700:4700::1111\nnameserver 2001:4860:4860::8888' > /etc/resolv.conf" "opt_dns_boot"
 
     # 任务 3: 每天凌晨4点清洗
     add_smart_task "daily" "04:00" "${SCRIPT_DIR}/reset_ram_state.sh" "opt_daily_reset"
@@ -1164,8 +1411,8 @@ EOF
         add_smart_task "daily" "00:00" "ln -sf /dev/null /root/warpip/warp_log.txt" "opt_warp_log"
     fi
 
-    # ==================== 安装 screen (如果需要) ====================
-    echo -e "\n${GREEN}[7/7] 检查依赖...${PLAIN}"
+    # ==================== [8/8] 安装 screen ====================
+    echo -e "\n${GREEN}[8/8] 检查依赖...${PLAIN}"
 
     if [ "$has_warp" = true ] && [ -f "/root/WARP-UP.sh" ]; then
         if ! command -v screen >/dev/null 2>&1; then
@@ -1179,7 +1426,7 @@ EOF
             if command -v screen >/dev/null 2>&1; then
                 echo -e "  ${GREEN}✓${PLAIN} screen 已安装"
             else
-                echo -e "  ${RED}✗${PLAIN} screen 安装失败，WARP-UP.sh 可能无法后台运行"
+                echo -e "  ${RED}✗${PLAIN} screen 安装失败"
             fi
         else
             echo -e "  ${GREEN}✓${PLAIN} screen 已存在"
@@ -1191,15 +1438,15 @@ EOF
     # ==================== 完成总结 ====================
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
-    echo -e "${GREEN}║                    极致优化配置完成！                        ║${PLAIN}"
+    echo -e "${GREEN}║                x-ui/WARP 极致优化完成！                      ║${PLAIN}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${PLAIN}"
     echo ""
     echo "已完成的配置:"
-    echo -e "  ${GREEN}✓${PLAIN} Swap 已关闭"
-    echo -e "  ${GREEN}✓${PLAIN} 系统日志使用内存存储"
+    echo -e "  ${GREEN}✓${PLAIN} 通用系统优化"
+    echo -e "  ${GREEN}✓${PLAIN} DNS 已设置"
     [ "$has_warp" = true ] && echo -e "  ${GREEN}✓${PLAIN} WARP 日志已黑洞化"
     [ "$has_xui" = true ] && [ -n "$xui_db_path" ] && echo -e "  ${GREEN}✓${PLAIN} x-ui 数据库已内存化"
-    echo -e "  ${GREEN}✓${PLAIN} 清洗脚本已创建"
+    echo -e "  ${GREEN}✓${PLAIN} 恢复脚本已创建"
     echo -e "  ${GREEN}✓${PLAIN} 看门狗脚本已创建"
     echo -e "  ${GREEN}✓${PLAIN} 计划任务已配置"
     echo ""
@@ -1234,18 +1481,18 @@ main_menu() {
     while true; do
         clear
         echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
-        echo -e "${CYAN}║           Linux 系统工具箱 (综合优化版 v2.0)                 ║${PLAIN}"
+        echo -e "${CYAN}║           Linux 系统工具箱 (综合优化版 v2.1)                 ║${PLAIN}"
         echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${PLAIN}"
         echo -e "${CYAN}║${PLAIN}  环境: $([ "$IS_LXC" = true ] && echo "${YELLOW}LXC容器${PLAIN}" || echo "物理机/VM") | 调度: $([ "$HAS_CRON" = true ] && echo "${GREEN}Cron${PLAIN}" || echo "${GREEN}Systemd Timer${PLAIN}")               ${CYAN}║${PLAIN}"
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${PLAIN}"
         echo ""
         echo "  1) 显示系统和 IP 信息"
         echo "  2) 管理 Swap 空间与内核参数"
-        echo "  3) 执行系统极限精简 (慎用)"
+        echo "  3) 系统极致优化（通用版）"
         echo "  4) DNS 配置管理"
         echo "  5) 计划任务管理 (Cron/Timer)"
         echo ""
-        echo -e "  ${GREEN}6) x-ui 和 WARP 极致优化 (一键配置)${PLAIN}"
+        echo -e "  ${GREEN}6) x-ui/WARP 极致优化（专用版 - 内存运行模式）${PLAIN}"
         echo ""
         echo "  7) 退出"
         echo ""
@@ -1263,13 +1510,7 @@ main_menu() {
                 ;;
             3)
                 clear
-                echo -e "${RED}警告：此操作将删除系统文档、清理缓存并禁用非核心服务！${PLAIN}"
-                read -rp "确认继续? (y/N): " confirm
-                if [[ "$confirm" =~ ^[yY]$ ]]; then
-                    system_streamline
-                else
-                    echo "操作已取消。"
-                fi
+                system_extreme_optimize
                 ;;
             4)
                 clear
