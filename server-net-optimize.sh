@@ -572,6 +572,14 @@ DNS_ALIYUN="nameserver 223.5.5.5\nnameserver 223.6.6.6\nnameserver 2400:3200::1\
 set_dns() {
     local dns_content="$1"
 
+    # 检查是否有 immutable 属性
+    if command -v lsattr &>/dev/null && command -v chattr &>/dev/null; then
+        if lsattr /etc/resolv.conf 2>/dev/null | grep -q 'i'; then
+            echo -e "${YELLOW}检测到文件被锁定，正在解锁...${PLAIN}"
+            chattr -i /etc/resolv.conf 2>/dev/null
+        fi
+    fi
+
     # 检查 resolv.conf 是否为符号链接
     if [ -L /etc/resolv.conf ]; then
         echo -e "${YELLOW}注意: /etc/resolv.conf 是符号链接${PLAIN}"
@@ -586,8 +594,14 @@ set_dns() {
         fi
     fi
 
-    echo -e "$dns_content" > /etc/resolv.conf
-    echo -e "${GREEN}✓ DNS 已更新${PLAIN}"
+    # 写入 DNS
+    if echo -e "$dns_content" > /etc/resolv.conf 2>/dev/null; then
+        echo -e "${GREEN}✓ DNS 已更新${PLAIN}"
+    else
+        echo -e "${RED}✗ 写入失败${PLAIN}"
+        return 1
+    fi
+    
     echo "当前配置:"
     cat /etc/resolv.conf
 }
