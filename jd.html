@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>安卓拉起京东 App 测试</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 20px;
+            background-color: #f7f8fa;
+            color: #333;
+        }
+        .card {
+            background: #fff;
+            padding: 16px;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            margin-bottom: 16px;
+        }
+        h2 { font-size: 18px; margin-top: 0; color: #e4393c; }
+        label { font-size: 14px; color: #666; }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0 16px;
+            box-sizing: border-box;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        button {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 10px;
+            text-align: center;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: bold;
+            box-sizing: border-box;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-primary { background-color: #e4393c; color: #fff; }
+        .btn-secondary { background-color: #ff9600; color: #fff; }
+        .btn-outline { background-color: #fff; color: #333; border: 1px solid #ccc; }
+        .tips { font-size: 12px; color: #999; line-height: 1.5; margin-top: 4px; margin-bottom: 12px; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>测试链接设置</h2>
+        <label for="targetUrl">输入京东商品/活动页完整链接：</label>
+        <!-- 默认填入一个有效商品链接，可粘贴任意自定义京东链接 -->
+        <input type="text" id="targetUrl" value="https://h5speed.m.jd.com/event/getRule?version=1.3.0" placeholder="例如：https://item.jd.com/xxxxxx.html">
+    </div>
+
+    <div class="card">
+        <h2>手动点击触发（用户交互）</h2>
+        
+        <!-- 方式 1: Android Chrome Intent 协议 -->
+        <button class="btn btn-primary" onclick="launchIntent()">方式 1：Android Intent 唤起 (Chrome/原生内核)</button>
+        <p class="tips">使用安卓标准 intent:// 协议唤醒。如果未安装京东，将自动降级打开填写的网页地址。</p>
+
+        <!-- 方式 2: URL Scheme 协议 -->
+        <button class="btn btn-secondary" onclick="launchScheme()">方式 2：URL Scheme 唤起 (通用第三方浏览器)</button>
+        <p class="tips">使用 openapp.jdmobile:// 协议，适合各类第三方定制浏览器（如 Via、夸克、UC 等）。</p>
+    </div>
+
+    <div class="card">
+        <h2>自动/静默唤起测试（无用户点击）</h2>
+        <button class="btn btn-outline" onclick="triggerAutoLaunch()">立即测试【延迟 1 秒后自动拉起】</button>
+        <p class="tips">测试浏览器是否允许无用户点击时静默唤起外部应用（多数浏览器会弹出拦截警告）。</p>
+    </div>
+
+    <script>
+        // 解析输入的 URL，自动匹配最合适的京东跳转协议参数
+        function parseJdParams(inputUrl) {
+            const url = inputUrl.trim();
+            // 尝试匹配链接中的商品编号 SKU（如 item.jd.com/123456.html 或 product/123456）
+            const skuMatch = url.match(/(?:item\.jd\.com\/|product\/)(\d+)/);
+            
+            if (skuMatch && skuMatch[1]) {
+                // 如果是商品详情页，直接唤起商品详情原生页
+                return {
+                    category: "jump",
+                    des: "productDetail",
+                    skuId: skuMatch[1],
+                    sourceType: "custom_html",
+                    sourceValue: "custom_android"
+                };
+            } else {
+                // 如果是活动页、短链接或其他页面，唤起京东内置浏览器打开该链接
+                return {
+                    category: "jump",
+                    des: "m",
+                    url: url
+                };
+            }
+        }
+
+        // 构造 URL Scheme
+        function getJdScheme(url) {
+            const params = parseJdParams(url);
+            return "openapp.jdmobile://virtual?params=" + encodeURIComponent(JSON.stringify(params));
+        }
+
+        // 构造 Android Intent 链接
+        function getJdIntent(url) {
+            const params = encodeURIComponent(JSON.stringify(parseJdParams(url)));
+            const fallbackUrl = encodeURIComponent(url.trim());
+            return `intent://virtual?params=${params}#Intent;scheme=openapp.jdmobile;package=com.jingdong.app.mall;S.browser_fallback_url=${fallbackUrl};end`;
+        }
+
+        // 1. Android Intent 唤起
+        function launchIntent() {
+            const url = document.getElementById('targetUrl').value;
+            if (!url) {
+                alert("请输入链接！");
+                return;
+            }
+            window.location.href = getJdIntent(url);
+        }
+
+        // 2. URL Scheme 唤起
+        function launchScheme() {
+            const url = document.getElementById('targetUrl').value;
+            if (!url) {
+                alert("请输入链接！");
+                return;
+            }
+            window.location.href = getJdScheme(url);
+        }
+
+        // 3. 模拟自动静默触发
+        function triggerAutoLaunch() {
+            const url = document.getElementById('targetUrl').value;
+            if (!url) {
+                alert("请输入链接！");
+                return;
+            }
+            alert("1 秒后将尝试静默拉起，请观察浏览器是否弹出权限或拦截提示！");
+            
+            setTimeout(() => {
+                const schemeUrl = getJdScheme(url);
+                const iframe = document.createElement("iframe");
+                iframe.style.display = "none";
+                iframe.src = schemeUrl;
+                document.body.appendChild(iframe);
+                
+                setTimeout(() => {
+                    document.body.removeChild(iframe);
+                }, 2000);
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
